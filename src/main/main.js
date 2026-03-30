@@ -242,6 +242,59 @@ ipcMain.handle('clear-zip-archive', async (event, { name }) => {
   } catch (err) { return { success: false, error: err.message }; }
 });
 
+// Browse for a destination folder (for unmatched file copy)
+ipcMain.handle('get-unmatched-files', async (event, { name }) => {
+  try {
+    const p = projectManager.getAllProjects().find(p => p.name === name);
+    if (!p) return { success: true, files: [] };
+    const dir = require('path').join(p.projectDir, 'NewFilesDetected');
+    if (!(await fs.pathExists(dir))) return { success: true, files: [] };
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const files = entries.filter(e => e.isFile()).map(e => e.name);
+    return { success: true, files };
+  } catch (err) { return { success: false, error: err.message, files: [] }; }
+});
+
+ipcMain.handle('browse-for-dest', async (event, { initialPath }) => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory'],
+      title: 'Select Destination Folder',
+      defaultPath: initialPath || undefined
+    });
+    if (result.canceled) return { success: false };
+    return { success: true, path: result.filePaths[0] };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+// Copy an unmatched file to a chosen folder and add it to the map
+ipcMain.handle('place-unmatched-file', async (event, { projectName, filename, destFolder }) => {
+  try {
+    const p = projectManager.getAllProjects().find(p => p.name === projectName);
+    if (!p) throw new Error('Project not found');
+
+    const srcPath  = require('path').join(p.projectDir, 'NewFilesDetected', filename);
+    const destPath = require('path').join(destFolder, filename);
+
+    if (!(await fs.pathExists(srcPath))) throw new Error('Source file not found: ' + srcPath);
+
+    // Copy to destination
+    await fs.copy(srcPath, destPath, { overwrite: true });
+
+    // Add to map using relative path key
+    const map = projectManager.getProjectMap(projectName);
+    const relKey = require('path').relative(map.destinationRoot, destPath);
+    const tokenized = '{root}' + require('path').sep + relKey;
+    await projectManager.addFileToMap(projectName, relKey, tokenized);
+
+    // Remove from NewFilesDetected
+    await fs.remove(srcPath);
+
+    sendStateUpdate();
+    return { success: true, relKey, destPath };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
 ipcMain.handle('get-zip-archive-count', async (event, { name }) => {
   try {
     const p = projectManager.getAllProjects().find(p => p.name === name);
@@ -256,7 +309,7 @@ ipcMain.handle('clear-run-log', async (event, { name }) => {
   try {
     const p = projectManager.getAllProjects().find(p => p.name === name);
     if (!p) throw new Error('Project not found');
-    const logPath = require('path').join(p.projectDir, 'run_log.json');
+    const logPath = require('path').join(p.projectDir, 'config', 'run_log.json');
     await fs.writeJson(logPath, []);
     // Reset nextRunNumber in map too
     await projectManager.resetRunNumber(name);
@@ -269,7 +322,7 @@ ipcMain.handle('open-run-log', async (event, { name }) => {
   try {
     const p = projectManager.getAllProjects().find(p => p.name === name);
     if (!p) throw new Error('Project not found');
-    const logPath = path.join(p.projectDir, 'run_log.json');
+    const logPath = path.join(p.projectDir, 'config', 'run_log.json');
     if (!(await fs.pathExists(logPath))) return { success: false, error: 'No run log yet.' };
     await shell.openPath(logPath);
     return { success: true };

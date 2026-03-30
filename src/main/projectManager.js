@@ -19,8 +19,10 @@ class ProjectManager {
     console.log('[ProjectManager] entries in appRoot:', entries.map(e => e.name));
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const mapPath = path.join(appRoot, entry.name, 'project_map.json');
-      if (await fs.pathExists(mapPath)) {
+      // Check both config\ (new) and root (old, will be migrated)
+      const mapNew = path.join(appRoot, entry.name, 'config', 'project_map.json');
+      const mapOld = path.join(appRoot, entry.name, 'project_map.json');
+      if (await fs.pathExists(mapNew) || await fs.pathExists(mapOld)) {
         await this._loadProject(entry.name);
         console.log('[ProjectManager] loaded project:', entry.name);
       }
@@ -30,7 +32,10 @@ class ProjectManager {
 
   async _loadProject(name) {
     const projectDir = this._projectDir(name);
-    const mapPath = path.join(projectDir, 'project_map.json');
+    // ── Auto-migrate: move map/log from project root → config\ ───────────────
+    await this._migrateToConfigFolder(name);
+
+    const mapPath = this._mapPath(name);
     try {
       const map = await fs.readJson(mapPath);
       // ── Migration: upgrade old filename-keyed maps to relative-path keys ──
@@ -49,6 +54,26 @@ class ProjectManager {
       };
     } catch (err) {
       console.error(`Failed to load project ${name}:`, err);
+    }
+  }
+
+  async _migrateToConfigFolder(name) {
+    const projectDir = this._projectDir(name);
+    const configDir  = this._configDir(name);
+    await fs.ensureDir(configDir);
+
+    const oldMap    = path.join(projectDir, 'project_map.json');
+    const oldLog    = path.join(projectDir, 'run_log.json');
+    const newMap    = this._mapPath(name);
+    const newLog    = this._runLogPath(name);
+
+    if (await fs.pathExists(oldMap) && !(await fs.pathExists(newMap))) {
+      await fs.move(oldMap, newMap);
+      console.log(`[Migration] Moved project_map.json → config\ for "${name}"`);
+    }
+    if (await fs.pathExists(oldLog) && !(await fs.pathExists(newLog))) {
+      await fs.move(oldLog, newLog);
+      console.log(`[Migration] Moved run_log.json → config\ for "${name}"`);
     }
   }
 
@@ -75,6 +100,18 @@ class ProjectManager {
 
   _projectDir(name) {
     return path.join(this.config.getAppRoot(), name);
+  }
+
+  _configDir(name) {
+    return path.join(this._projectDir(name), 'config');
+  }
+
+  _mapPath(name) {
+    return path.join(this._configDir(name), 'project_map.json');
+  }
+
+  _runLogPath(name) {
+    return path.join(this._configDir(name), 'run_log.json');
   }
 
   getAllProjects() { return Object.values(this.projects); }
@@ -118,6 +155,7 @@ class ProjectManager {
     if (!name.match(/^[a-zA-Z0-9_\- ]+$/)) throw new Error('Invalid project name');
     const projectDir = this._projectDir(name);
     await fs.ensureDir(projectDir);
+    await fs.ensureDir(path.join(projectDir, 'config'));
     for (const sub of PROJECT_SUBDIRS) await fs.ensureDir(path.join(projectDir, sub));
     const map = await this._buildMap(name, destinationRoot, excludedFolders);
     this.maps[name] = map;
@@ -196,7 +234,8 @@ class ProjectManager {
       files
     };
 
-    await fs.writeJson(path.join(this._projectDir(name), 'project_map.json'), map, { spaces: 2 });
+    await fs.ensureDir(this._configDir(name));
+    await fs.writeJson(this._mapPath(name), map, { spaces: 2 });
     return map;
   }
 
@@ -251,7 +290,7 @@ class ProjectManager {
     if (!map) throw new Error(`Project "${projectName}" not found`);
     map.files[relKey] = destination;
     map.fileCount = Object.keys(map.files).length;
-    await fs.writeJson(path.join(this._projectDir(projectName), 'project_map.json'), map, { spaces: 2 });
+    await fs.writeJson(this._mapPath(projectName), map, { spaces: 2 });
   }
 
   async addFileToMap(projectName, relKey, tokenizedPath) {
@@ -354,11 +393,11 @@ class ProjectManager {
   async saveMap(projectName) {
     const map = this.maps[projectName];
     if (!map) return;
-    await fs.writeJson(path.join(this._projectDir(projectName), 'project_map.json'), map, { spaces: 2 });
+    await fs.writeJson(this._mapPath(projectName), map, { spaces: 2 });
   }
 
   async logRun(projectName, runEntry) {
-    const runLogPath = path.join(this._projectDir(projectName), 'run_log.json');
+    const runLogPath = this._runLogPath(projectName);
     let log = [];
     if (await fs.pathExists(runLogPath)) log = await fs.readJson(runLogPath);
     log.push(runEntry);
@@ -367,7 +406,7 @@ class ProjectManager {
   }
 
   async _readRunLog(projectName) {
-    const runLogPath = path.join(this._projectDir(projectName), 'run_log.json');
+    const runLogPath = this._runLogPath(projectName);
     if (!(await fs.pathExists(runLogPath))) return [];
     return fs.readJson(runLogPath);
   }

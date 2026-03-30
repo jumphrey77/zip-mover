@@ -6,13 +6,10 @@
 1.  If no files exist, brand new project, no files (manual initialization).  Suggestions
 2.  Docked App to Sytem TradeType
 
-1.  The same Wildcard Patterns are showing on every project page
-2.  Since we are Getting more and more files with "New" Files that have not been mapped,
-    when it give me a file that is new, prove a button next to each files that says "Copy to -->"
-    thatopens a file dialog, initial with the destination of the project, and I select a folder,
-    then move it there. To test this, please provide a random textfilename in you next zip file.
-3.  Can we move the project_map.json and run_log.json files to a config folder.  Since we are dropping 
-    files there, id rather that drop folder be empty
+Logfile
+"startedAt": "2026-03-27T15:37:47.248Z",
+"finishedAt": "2026-03-27T15:37:47.496Z",
+
 
 
 

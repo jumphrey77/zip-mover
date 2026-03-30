@@ -361,6 +361,61 @@ function filterMapEntries(query) {
   });
 }
 
+// ─── Unmatched Files Loader ──────────────────────────────────────────────────
+
+async function loadUnmatchedFiles(projectName, destinationRoot) {
+  const body = $('unmatchedFilesBody');
+  if (!body) return;
+
+  const res = await zm.getUnmatchedFiles(projectName);
+  const files = res.files || [];
+
+  if (files.length === 0) {
+    body.innerHTML = `<div style="color:var(--text-muted);font-size:12px;line-height:1.6">
+      No unmatched files. Files with no map entry are placed in
+      <code style="color:var(--accent);background:var(--bg-base);padding:1px 5px;border-radius:3px">NewFilesDetected/</code>.
+    </div>`;
+    return;
+  }
+
+  body.innerHTML = files.map(filename => `
+    <div class="unmatched-file-row">
+      <span class="unmatched-file-name">&#x1F4C4; ${escapeHtml(filename)}</span>
+      <button class="btn-copy-to" data-filename="${escapeHtml(filename)}">Copy to &rarr;</button>
+    </div>
+  `).join('');
+
+  body.querySelectorAll('.btn-copy-to').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const filename = btn.dataset.filename;
+      // destRoot captured in closure — avoids HTML attribute escaping issues with backslashes
+      const res = await zm.browseForDest(destinationRoot);
+      if (!res.success) return;
+
+      btn.textContent = 'Copying…';
+      btn.disabled = true;
+
+      const placeRes = await zm.placeUnmatchedFile(projectName, filename, res.path);
+
+      if (!placeRes.success) {
+        alert('Failed: ' + placeRes.error);
+        btn.textContent = 'Copy to →';
+        btn.disabled = false;
+        return;
+      }
+
+      // Remove the row and show success
+      const row = btn.closest('.unmatched-file-row');
+      row.innerHTML = `<span style="color:var(--accent);font-size:11px;font-family:var(--font-mono)">✓ ${escapeHtml(filename)} → added to map</span>`;
+      setTimeout(() => {
+        row.style.opacity = '0';
+        row.style.transition = 'opacity 0.4s';
+        setTimeout(() => row.remove(), 400);
+      }, 1500);
+    });
+  });
+}
+
 // ─── Project Detail ───────────────────────────────────────────────────────────
 
 async function openProject(name) {
@@ -463,16 +518,15 @@ function renderProjectDetail(details) {
     </div>
   `;
 
-  // ── UNMATCHED FILES ────────────────────────────────────────────────────────
+  // ── UNMATCHED FILES ── loaded async after render ──────────────────────────
   const unmatchedHtml = `
     <div class="detail-card">
-      <div class="detail-card-header"><div class="detail-card-title">UNMATCHED FILES</div></div>
-      <div class="detail-card-body">
-        <div style="color:var(--text-muted);font-size:12px;line-height:1.6">
-          Files with no map entry go to
-          <code style="color:var(--accent);background:var(--bg-base);padding:1px 5px;border-radius:3px">NewFilesDetected/</code>.
-          Click a map entry to assign its destination.
-        </div>
+      <div class="detail-card-header">
+        <div class="detail-card-title">UNMATCHED FILES</div>
+        <button class="btn-edit-exclusions" id="btnRefreshUnmatched" title="Refresh list">↻</button>
+      </div>
+      <div class="detail-card-body" id="unmatchedFilesBody">
+        <div style="color:var(--text-muted);font-size:11px">Loading…</div>
       </div>
     </div>
   `;
@@ -586,6 +640,10 @@ function renderProjectDetail(details) {
 
   // ── Bind buttons ──────────────────────────────────────────────────────────
   on('btnEditExclusions', 'click', () => openExclusionsModal(details.name));
+  on('btnRefreshUnmatched', 'click', () => loadUnmatchedFiles(details.name, map.destinationRoot));
+
+  // Load unmatched files
+  loadUnmatchedFiles(details.name, map.destinationRoot);
   on('btnOpenProjectFolder', 'click', () => zm.openProjectFolder(details.name));
   on('btnOpenDestFolder',    'click', () => zm.openDestFolder(details.name));
 

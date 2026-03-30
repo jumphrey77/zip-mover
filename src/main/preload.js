@@ -28,6 +28,9 @@ contextBridge.exposeInMainWorld('zipmover', {
   clearRunLog:          (name) => ipcRenderer.invoke('clear-run-log',         { name }),
   getMapWithSizes:      (name) => ipcRenderer.invoke('get-map-with-sizes',    { name }),
   clearZipArchive:      (name) => ipcRenderer.invoke('clear-zip-archive',     { name }),
+  getUnmatchedFiles:    (name) => ipcRenderer.invoke('get-unmatched-files',  { name }),
+  browseForDest:        (initialPath) => ipcRenderer.invoke('browse-for-dest',       { initialPath }),
+  placeUnmatchedFile:   (projectName, filename, destFolder) => ipcRenderer.invoke('place-unmatched-file', { projectName, filename, destFolder }),
   getZipArchiveCount:   (name) => ipcRenderer.invoke('get-zip-archive-count', { name }),
 
   // ── Projects ──────────────────────────────────────────────────────────────
