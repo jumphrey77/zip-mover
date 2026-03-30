@@ -182,6 +182,20 @@ ipcMain.handle('handle-drop', async (event, { projectName, filePath }) => {
   } catch (err) { return { success: false, error: err.message }; }
 });
 
+ipcMain.handle('resolve-path-conflict', async (event, { projectName, filename, filePath, relKey }) => {
+  try {
+    const map = projectManager.getProjectMap(projectName);
+    if (!map) throw new Error('No map');
+    const tokenizedPath = map.files[relKey];
+    if (!tokenizedPath) throw new Error('Key not found: ' + relKey);
+    const result = await fileDropHandler.resolveConflict(projectName, filename, filePath, relKey, tokenizedPath);
+    sendStateUpdate();
+    sendToMain('run-complete', { projectName, result: result.result });
+    compactWindowManager.send('run-complete', { projectName, result: result.result });
+    return { success: true, ...result };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
 ipcMain.handle('resolve-conflict', async (event, { projectName, filename, filePath }) => {
   try {
     const result = await fileDropHandler.resolveConflict(projectName, filename, filePath);
@@ -199,6 +213,15 @@ ipcMain.handle('open-project-folder', async (event, { name }) => {
     const p = projectManager.getAllProjects().find(p => p.name === name);
     if (!p) throw new Error('Project not found');
     await shell.openPath(p.projectDir);
+    return { success: true };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+ipcMain.handle('open-dest-folder', async (event, { name }) => {
+  try {
+    const map = projectManager.getProjectMap(name);
+    if (!map || !map.destinationRoot) throw new Error('No destination root set');
+    await shell.openPath(map.destinationRoot);
     return { success: true };
   } catch (err) { return { success: false, error: err.message }; }
 });

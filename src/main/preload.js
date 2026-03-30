@@ -17,10 +17,12 @@ contextBridge.exposeInMainWorld('zipmover', {
 
   // ── File drop ─────────────────────────────────────────────────────────────
   handleDrop:      (projectName, filePath) => ipcRenderer.invoke('handle-drop',      { projectName, filePath }),
-  resolveConflict: (projectName, filename, filePath) => ipcRenderer.invoke('resolve-conflict', { projectName, filename, filePath }),
+  resolveConflict:     (projectName, filename, filePath)          => ipcRenderer.invoke('resolve-conflict',      { projectName, filename, filePath }),
+  resolvePathConflict: (projectName, filename, filePath, relKey) => ipcRenderer.invoke('resolve-path-conflict', { projectName, filename, filePath, relKey }),
 
   // ── Shell ─────────────────────────────────────────────────────────────────
   openProjectFolder: (name) => ipcRenderer.invoke('open-project-folder', { name }),
+  openDestFolder:    (name) => ipcRenderer.invoke('open-dest-folder',     { name }),
   openRootFolder:    ()     => ipcRenderer.invoke('open-root-folder'),
   openRunLog:        (name) => ipcRenderer.invoke('open-run-log',      { name }),
   clearRunLog:          (name) => ipcRenderer.invoke('clear-run-log',         { name }),

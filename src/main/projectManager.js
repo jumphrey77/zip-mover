@@ -1,15 +1,8 @@
 // src/main/projectManager.js
-// Manages ZipMover projects: creation, map building, run logging
-
 const path = require('path');
 const fs = require('fs-extra');
 
-const PROJECT_SUBDIRS = [
-  'FileBackups',
-  'ZipArchive',
-  'NewFilesDetected',
-  'Excluded'
-];
+const PROJECT_SUBDIRS = ['FileBackups', 'ZipArchive', 'NewFilesDetected', 'Excluded'];
 
 class ProjectManager {
   constructor(configManager) {
@@ -26,8 +19,7 @@ class ProjectManager {
     console.log('[ProjectManager] entries in appRoot:', entries.map(e => e.name));
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const projectDir = path.join(appRoot, entry.name);
-      const mapPath = path.join(projectDir, 'project_map.json');
+      const mapPath = path.join(appRoot, entry.name, 'project_map.json');
       if (await fs.pathExists(mapPath)) {
         await this._loadProject(entry.name);
         console.log('[ProjectManager] loaded project:', entry.name);
@@ -41,118 +33,104 @@ class ProjectManager {
     const mapPath = path.join(projectDir, 'project_map.json');
     try {
       const map = await fs.readJson(mapPath);
+      // ── Migration: upgrade old filename-keyed maps to relative-path keys ──
+      map.files = this._migrateMapKeys(map.files || {}, map.destinationRoot);
       this.maps[name] = map;
       this.projects[name] = {
-        name,
-        projectDir,
-        destinationRoot: map.destinationRoot,
-        nextRunNumber: map.nextRunNumber || 1,
-        fileCount: Object.keys(map.files || {}).length,
-        excludedFolders: map.excludedFolders || [],
-        excludedFiles: map.excludedFiles || [],
-        allowDropToUI: map.allowDropToUI !== false,
-        lastRun: await this._getLastRun(name)
+        name, projectDir,
+        destinationRoot:  map.destinationRoot,
+        nextRunNumber:    map.nextRunNumber || 1,
+        fileCount:        Object.keys(map.files).length,
+        excludedFolders:  map.excludedFolders || [],
+        excludedFiles:    map.excludedFiles || [],
+        wildcards:        map.wildcards || [],
+        allowDropToUI:    map.allowDropToUI !== false,
+        lastRun:          await this._getLastRun(name)
       };
     } catch (err) {
       console.error(`Failed to load project ${name}:`, err);
     }
   }
 
+  // ── Migration helper: detect old-style filename-only keys and warn ─────────
+  // Old maps had keys like "index.ts" → "{root}\src\index.ts"
+  // New maps have keys like "src\index.ts" → "{root}\src\index.ts"
+  _migrateMapKeys(files, destinationRoot) {
+    const migrated = {};
+    for (const [key, tokenizedPath] of Object.entries(files)) {
+      // If the key equals the filename portion of the value, it's old-style
+      const valueBasename = path.basename(tokenizedPath);
+      if (key === valueBasename) {
+        // Derive the relative key from the tokenized path
+        const relPath = tokenizedPath
+          .replace('{root}' + path.sep, '')
+          .replace('{root}/', '');
+        migrated[relPath] = tokenizedPath;
+      } else {
+        migrated[key] = tokenizedPath;
+      }
+    }
+    return migrated;
+  }
+
   _projectDir(name) {
     return path.join(this.config.getAppRoot(), name);
   }
 
-  getAllProjects() {
-    return Object.values(this.projects);
-  }
+  getAllProjects() { return Object.values(this.projects); }
 
   async getProjectDetails(name) {
     const project = this.projects[name];
     if (!project) throw new Error(`Project "${name}" not found`);
     const runLog = await this._readRunLog(name);
-    return {
-      ...project,
-      map: this.maps[name],
-      runLog: runLog.slice(-50).reverse()
-    };
+    return { ...project, map: this.maps[name], runLog: runLog.slice(-50).reverse() };
   }
 
-  getProjectMap(name) {
-    return this.maps[name] || null;
-  }
+  getProjectMap(name) { return this.maps[name] || null; }
 
-  // ── Scan root-level folders of a destination directory ───────────────────
   async scanRootFolders(destinationRoot) {
     const results = [];
-    let entries;
-    try {
-      entries = await fs.readdir(destinationRoot, { withFileTypes: true });
-    } catch (e) {
-      throw new Error(`Cannot read destination folder: ${e.message}`);
-    }
+    const entries = await fs.readdir(destinationRoot, { withFileTypes: true }).catch(e => { throw new Error(`Cannot read: ${e.message}`); });
     for (const entry of entries) {
-      if (entry.isDirectory()) {
-        results.push(entry.name);
-      }
+      if (entry.isDirectory()) results.push(entry.name);
     }
     return results.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
   }
 
-  // ── Parse .gitignore and return root-level folder names it excludes ───────
   async parseGitignoreFolders(destinationRoot) {
     const gitignorePath = path.join(destinationRoot, '.gitignore');
     if (!(await fs.pathExists(gitignorePath))) return [];
-
     const raw = await fs.readFile(gitignorePath, 'utf8');
-    const lines = raw.split(/\r?\n/);
     const excluded = new Set();
-
-    for (let line of lines) {
+    for (let line of raw.split(/\r?\n/)) {
       line = line.trim();
-      // Skip blank lines, comments, negations, and file patterns
       if (!line || line.startsWith('#') || line.startsWith('!')) continue;
-      // Skip lines with wildcards (file patterns like *.log)
       if (line.includes('*') || line.includes('?')) continue;
-      // Skip deep paths (we only want root-level folder names)
-      // A root-level folder entry looks like: node_modules  OR  node_modules/
-      const stripped = line.replace(/\/$/, '');   // remove trailing slash
-      if (stripped.includes('/')) continue;        // skip deep paths
-      if (stripped.startsWith('.') && !stripped.includes('/')) {
-        excluded.add(stripped);                    // allow .git, .cache etc.
-        continue;
-      }
+      const stripped = line.replace(/\/$/, '');
+      if (stripped.includes('/')) continue;
       excluded.add(stripped);
     }
-
     return [...excluded];
   }
 
-  // ── Create project (folders created; map built with exclusions) ───────────
   async createProject(name, destinationRoot, excludedFolders = []) {
     if (this.projects[name]) throw new Error(`Project "${name}" already exists`);
     if (!name.match(/^[a-zA-Z0-9_\- ]+$/)) throw new Error('Invalid project name');
-
     const projectDir = this._projectDir(name);
     await fs.ensureDir(projectDir);
-    for (const sub of PROJECT_SUBDIRS) {
-      await fs.ensureDir(path.join(projectDir, sub));
-    }
-
+    for (const sub of PROJECT_SUBDIRS) await fs.ensureDir(path.join(projectDir, sub));
     const map = await this._buildMap(name, destinationRoot, excludedFolders);
-
     this.maps[name] = map;
     this.projects[name] = {
-      name,
-      projectDir,
-      destinationRoot,
+      name, projectDir, destinationRoot,
       nextRunNumber: 1,
       fileCount: Object.keys(map.files).length,
       excludedFolders: map.excludedFolders,
       excludedFiles: [],
+      wildcards: [],
       allowDropToUI: true,
       lastRun: null
     };
-
     return this.projects[name];
   }
 
@@ -162,16 +140,12 @@ class ProjectManager {
     delete this.maps[name];
   }
 
-  // ── Rebuild using saved excludedFolders (or override with new list) ───────
   async rebuildMap(name, newExcludedFolders) {
     const project = this.projects[name];
     if (!project) throw new Error(`Project "${name}" not found`);
-
-    // Use provided list if given, otherwise keep existing
     const excluded = newExcludedFolders !== undefined
       ? newExcludedFolders
       : (this.maps[name] && this.maps[name].excludedFolders) || [];
-
     const map = await this._buildMap(name, project.destinationRoot, excluded);
     this.maps[name] = map;
     this.projects[name].fileCount = Object.keys(map.files).length;
@@ -179,61 +153,30 @@ class ProjectManager {
     return map;
   }
 
-  // ── Update per-project settings (allowDropToUI etc.) ─────────────────────
-  async updateProjectSettings(name, settings) {
-    const map = this.maps[name];
-    const project = this.projects[name];
-    if (!map) throw new Error(`Project "${name}" not found`);
-    // Merge allowed settings keys
-    const allowed = ['allowDropToUI', 'excludedFiles'];
-    for (const key of allowed) {
-      if (settings[key] !== undefined) {
-        map[key] = settings[key];
-        project[key] = settings[key];
-      }
-    }
-    await this.saveMap(name);
-  }
-
-  // ── Update exclusions and rebuild ─────────────────────────────────────────
   async updateExclusionsAndRebuild(name, excludedFolders) {
     return this.rebuildMap(name, excludedFolders);
   }
 
   async _buildMap(name, destinationRoot, excludedFolders = []) {
     const files = {};
-    const collisions = [];
-    const seenFilenames = {};
-
-    // Normalise excluded set for fast lookup (lowercase for case-insensitive match)
+    // No more collision tracking needed — relative path keys are unique
     const excludedSet = new Set(excludedFolders.map(f => f.toLowerCase()));
 
     const scan = async (dir, isRoot = false) => {
       let entries;
-      try {
-        entries = await fs.readdir(dir, { withFileTypes: true });
-      } catch (e) {
-        return;
-      }
+      try { entries = await fs.readdir(dir, { withFileTypes: true }); }
+      catch (e) { return; }
 
       for (const entry of entries) {
         const fullPath = path.join(dir, entry.name);
-
         if (entry.isDirectory()) {
-          // Only apply exclusion filter at root level
           if (isRoot && excludedSet.has(entry.name.toLowerCase())) continue;
           await scan(fullPath, false);
         } else if (entry.isFile()) {
-          const filename = entry.name;
-          const relativePath = path.relative(destinationRoot, fullPath);
-          const tokenizedPath = '{root}' + path.sep + relativePath;
-
-          if (seenFilenames[filename] && !collisions.includes(filename)) {
-            collisions.push(filename);
-          }
-
-          files[filename] = tokenizedPath;
-          seenFilenames[filename] = tokenizedPath;
+          // KEY = relative path (e.g. "src\components\index.ts")
+          const relKey  = path.relative(destinationRoot, fullPath);
+          const tokenizedPath = '{root}' + path.sep + relKey;
+          files[relKey] = tokenizedPath;
         }
       }
     };
@@ -242,69 +185,112 @@ class ProjectManager {
 
     const map = {
       destinationRoot,
-      excludedFolders,                                          // ← persisted
-      excludedFiles: (this.maps[name] && this.maps[name].excludedFiles) || [],
-      wildcards: (this.maps[name] && this.maps[name].wildcards) || [],
-      allowDropToUI: this.maps[name] ? (this.maps[name].allowDropToUI !== false) : true,
-      nextRunNumber: (this.maps[name] && this.maps[name].nextRunNumber) || 1,
-      builtAt: new Date().toISOString(),
-      fileCount: Object.keys(files).length,
-      collisions,
+      excludedFolders,
+      excludedFiles:  (this.maps[name] && this.maps[name].excludedFiles)  || [],
+      wildcards:      (this.maps[name] && this.maps[name].wildcards)      || [],
+      allowDropToUI:  this.maps[name] ? (this.maps[name].allowDropToUI !== false) : true,
+      nextRunNumber:  (this.maps[name] && this.maps[name].nextRunNumber)  || 1,
+      builtAt:        new Date().toISOString(),
+      fileCount:      Object.keys(files).length,
+      collisions:     [],   // always empty now — relative keys are unique
       files
     };
 
-    const projectDir = this._projectDir(name);
-    await fs.writeJson(path.join(projectDir, 'project_map.json'), map, { spaces: 2 });
+    await fs.writeJson(path.join(this._projectDir(name), 'project_map.json'), map, { spaces: 2 });
     return map;
   }
 
-  async updateMapEntry(projectName, filename, destination) {
+  // ── Lookup helpers ────────────────────────────────────────────────────────
+  // Find all map entries whose filename portion matches a given name.
+  // Returns array of { relKey, tokenizedPath }
+  findByFilename(projectName, filename) {
     const map = this.maps[projectName];
-    if (!map) throw new Error(`Project "${projectName}" not found`);
-    map.files[filename] = destination;
-    map.fileCount = Object.keys(map.files).length;
-    const projectDir = this._projectDir(projectName);
-    await fs.writeJson(path.join(projectDir, 'project_map.json'), map, { spaces: 2 });
+    if (!map) return [];
+    const results = [];
+    for (const [relKey, tokenizedPath] of Object.entries(map.files || {})) {
+      if (path.basename(relKey).toLowerCase() === filename.toLowerCase()) {
+        results.push({ relKey, tokenizedPath });
+      }
+    }
+    return results;
   }
 
-  async resetRunNumber(projectName) {
+  // Find the best single match using zip-internal path hint
+  // zipInternalPath: e.g. "src/components/index.ts" from inside the zip
+  findBestMatch(projectName, filename, zipInternalPath) {
+    const matches = this.findByFilename(projectName, filename);
+    if (matches.length === 0) return null;
+    if (matches.length === 1) return matches[0];
+
+    if (zipInternalPath) {
+      // Normalize separators
+      const zipDir = path.dirname(zipInternalPath).replace(/\//g, path.sep).toLowerCase();
+      // Score each match by how much of the zip path matches the map key folder
+      let best = null, bestScore = -1;
+      for (const m of matches) {
+        const mapDir = path.dirname(m.relKey).toLowerCase();
+        // Count matching path segments from the right
+        const zipParts = zipDir.split(path.sep).filter(Boolean);
+        const mapParts = mapDir.split(path.sep).filter(Boolean);
+        let score = 0;
+        for (let i = 0; i < Math.min(zipParts.length, mapParts.length); i++) {
+          if (zipParts[zipParts.length - 1 - i] === mapParts[mapParts.length - 1 - i]) score++;
+          else break;
+        }
+        if (score > bestScore) { bestScore = score; best = m; }
+      }
+      return best;
+    }
+
+    return null;  // Ambiguous — caller must prompt user
+  }
+
+  // ── Map entry operations ──────────────────────────────────────────────────
+  async updateMapEntry(projectName, relKey, destination) {
     const map = this.maps[projectName];
-    const project = this.projects[projectName];
+    if (!map) throw new Error(`Project "${projectName}" not found`);
+    map.files[relKey] = destination;
+    map.fileCount = Object.keys(map.files).length;
+    await fs.writeJson(path.join(this._projectDir(projectName), 'project_map.json'), map, { spaces: 2 });
+  }
+
+  async addFileToMap(projectName, relKey, tokenizedPath) {
+    const map = this.maps[projectName];
     if (!map) return;
-    map.nextRunNumber = 1;
-    if (project) project.nextRunNumber = 1;
-    if (project) project.lastRun = null;
+    map.files[relKey] = tokenizedPath;
+    map.fileCount = Object.keys(map.files).length;
     await this.saveMap(projectName);
   }
 
+  async updateProjectSettings(name, settings) {
+    const map = this.maps[name];
+    const project = this.projects[name];
+    if (!map) throw new Error(`Project "${name}" not found`);
+    const allowed = ['allowDropToUI', 'excludedFiles'];
+    for (const key of allowed) {
+      if (settings[key] !== undefined) { map[key] = settings[key]; project[key] = settings[key]; }
+    }
+    await this.saveMap(name);
+  }
 
-  // ── Wildcard pattern matching ─────────────────────────────────────────────
-  // Converts a user pattern (with * and [*]) to a RegExp
+  // ── Wildcard support ──────────────────────────────────────────────────────
   _patternToRegex(pattern) {
-    // Must handle [*] BEFORE escaping to avoid mangling the brackets
-    // Step 1: protect [*] with a placeholder
     let p = pattern.replace(/\[\*\]/g, '\x00SC\x00');
-    // Step 2: escape all regex special chars (including [ ] { } . + ^ $ etc.)
-    p = p.replace(/[.+^${}()|\[\]\\]/g, '\\$&');
-    // Step 3: restore single-char wildcard placeholder → regex dot
+    p = p.replace(/[.+^${}()|[\]\\]/g, '\\$&');
     p = p.replace(/\x00SC\x00/g, '.');
-    // Step 4: * → .* (any chars)
     p = p.replace(/\*/g, '.*');
     return new RegExp('^' + p + '$', 'i');
   }
 
-  // Find first matching wildcard for a filename
   matchWildcard(projectName, filename) {
     const map = this.maps[projectName];
     if (!map || !map.wildcards || !map.wildcards.length) return null;
     for (const wc of map.wildcards) {
-      const re = this._patternToRegex(wc.pattern);
-      if (re.test(filename)) return wc;
+      if (this._patternToRegex(wc.pattern).test(filename)) return wc;
     }
     return null;
   }
 
-  // Resolve wildcard destination — replaces {root} and {filename}
   resolveWildcardDestination(projectName, wc, filename) {
     const map = this.maps[projectName];
     if (!map) return null;
@@ -313,20 +299,16 @@ class ProjectManager {
       .replace('{filename}', filename);
   }
 
-  // Add a wildcard pattern to the map
   async addWildcard(projectName, pattern, destination, description) {
     const map = this.maps[projectName];
     if (!map) throw new Error(`Project "${projectName}" not found`);
     if (!map.wildcards) map.wildcards = [];
-    // Check for duplicate pattern
-    if (map.wildcards.find(w => w.pattern.toLowerCase() === pattern.toLowerCase())) {
+    if (map.wildcards.find(w => w.pattern.toLowerCase() === pattern.toLowerCase()))
       throw new Error(`Pattern "${pattern}" already exists`);
-    }
     map.wildcards.push({ pattern, destination, description: description || '' });
     await this.saveMap(projectName);
   }
 
-  // Remove a wildcard pattern
   async removeWildcard(projectName, pattern) {
     const map = this.maps[projectName];
     if (!map) throw new Error(`Project "${projectName}" not found`);
@@ -334,7 +316,6 @@ class ProjectManager {
     await this.saveMap(projectName);
   }
 
-  // Update a wildcard entry
   async updateWildcard(projectName, oldPattern, newEntry) {
     const map = this.maps[projectName];
     if (!map) throw new Error(`Project "${projectName}" not found`);
@@ -344,21 +325,14 @@ class ProjectManager {
     await this.saveMap(projectName);
   }
 
-  // Add a new file to the permanent map (called after wildcard deploy)
-  async addFileToMap(projectName, filename, tokenizedPath) {
-    const map = this.maps[projectName];
-    if (!map) return;
-    map.files[filename] = tokenizedPath;
-    map.fileCount = Object.keys(map.files).length;
-    await this.saveMap(projectName);
-  }
-
+  // ── Destination resolution ────────────────────────────────────────────────
   resolveDestination(projectName, tokenizedPath) {
     const map = this.maps[projectName];
     if (!map) return null;
     return tokenizedPath.replace('{root}', map.destinationRoot);
   }
 
+  // ── Run number ───────────────────────────────────────────────────────────
   incrementRunNumber(projectName) {
     const map = this.maps[projectName];
     const project = this.projects[projectName];
@@ -368,19 +342,25 @@ class ProjectManager {
     return run;
   }
 
+  async resetRunNumber(projectName) {
+    const map = this.maps[projectName];
+    const project = this.projects[projectName];
+    if (!map) return;
+    map.nextRunNumber = 1;
+    if (project) { project.nextRunNumber = 1; project.lastRun = null; }
+    await this.saveMap(projectName);
+  }
+
   async saveMap(projectName) {
     const map = this.maps[projectName];
     if (!map) return;
-    const projectDir = this._projectDir(projectName);
-    await fs.writeJson(path.join(projectDir, 'project_map.json'), map, { spaces: 2 });
+    await fs.writeJson(path.join(this._projectDir(projectName), 'project_map.json'), map, { spaces: 2 });
   }
 
   async logRun(projectName, runEntry) {
     const runLogPath = path.join(this._projectDir(projectName), 'run_log.json');
     let log = [];
-    if (await fs.pathExists(runLogPath)) {
-      log = await fs.readJson(runLogPath);
-    }
+    if (await fs.pathExists(runLogPath)) log = await fs.readJson(runLogPath);
     log.push(runEntry);
     await fs.writeJson(runLogPath, log, { spaces: 2 });
     this.projects[projectName].lastRun = runEntry;
@@ -404,10 +384,8 @@ class ProjectManager {
     if (runLog.length <= retentionRuns) return;
     const runsToDelete = runLog.slice(0, runLog.length - retentionRuns);
     for (const run of runsToDelete) {
-      const runBackupDir = path.join(backupDir, `Run${String(run.runNumber).padStart(3,'0')}`);
-      if (await fs.pathExists(runBackupDir)) {
-        await fs.remove(runBackupDir);
-      }
+      const d = path.join(backupDir, `Run${String(run.runNumber).padStart(3,'0')}`);
+      if (await fs.pathExists(d)) await fs.remove(d);
     }
   }
 }

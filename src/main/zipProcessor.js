@@ -66,7 +66,9 @@ class ZipProcessor {
       await fs.ensureDir(backupRunDir);
 
       for (const { filename, fullPath } of extractedFiles) {
-        const tokenizedDest = map.files[filename];
+        // Look up by relative path first (new), fall back to filename (migration)
+        const zipInternalRelPath = path.relative(extractDir, fullPath).replace(/\//g, path.sep);
+        let tokenizedDest = map.files[zipInternalRelPath] || map.files[filename] || null;
 
         // ── Excluded file check ───────────────────────────────────────────
         const excludedFiles = new Set((map.excludedFiles || []).map(f => f.toLowerCase()));
@@ -79,40 +81,55 @@ class ZipProcessor {
         }
 
         if (!tokenizedDest) {
-          // ── Try wildcard match before falling through to unmatched ────────
-          const wc = this.projects.matchWildcard(projectName, filename);
-          if (wc) {
-            const absoluteWcDest = this.projects.resolveWildcardDestination(projectName, wc, filename);
-            try {
-              await fs.ensureDir(path.dirname(absoluteWcDest));
-              await fs.copy(fullPath, absoluteWcDest, { overwrite: true });
-              runResult.filesDeployed.push({
+          // ── Try relative-path lookup using zip internal path ──────────────
+          // zipInternalPath = path inside the zip (e.g. src/components/index.ts)
+          const zipInternalPath = path.relative(extractDir, fullPath);
+          const bestMatch = this.projects.findBestMatch(projectName, filename, zipInternalPath);
+
+          if (bestMatch) {
+            // Unambiguous best match found
+            tokenizedDest = bestMatch.tokenizedPath;
+          } else {
+            // Check if there are multiple matches (ambiguous) — log for UI conflict
+            const allMatches = this.projects.findByFilename(projectName, filename);
+            if (allMatches.length > 1) {
+              runResult.filesUnmatched.push({
                 filename,
-                source: fullPath,
-                destination: absoluteWcDest,
-                wildcardPattern: wc.pattern
+                placedAt: null,
+                suggestion: 'Ambiguous: matches multiple paths — ' + allMatches.map(m => m.relKey).join(', '),
+                ambiguous: true,
+                matches: allMatches.map(m => m.relKey)
               });
-              // Add to permanent map
-              const wcMap = this.projects.getProjectMap(projectName);
-              const tokenized = absoluteWcDest.replace(wcMap.destinationRoot, '{root}');
-              await this.projects.addFileToMap(projectName, filename, tokenized);
-            } catch (err) {
-              runResult.errors.push({ filename, error: 'Wildcard deploy: ' + err.message });
+              continue;
             }
+
+            // ── Try wildcard ─────────────────────────────────────────────
+            const wc = this.projects.matchWildcard(projectName, filename);
+            if (wc) {
+              const absoluteWcDest = this.projects.resolveWildcardDestination(projectName, wc, filename);
+              try {
+                await fs.ensureDir(path.dirname(absoluteWcDest));
+                await fs.copy(fullPath, absoluteWcDest, { overwrite: true });
+                runResult.filesDeployed.push({ filename, source: fullPath, destination: absoluteWcDest, wildcardPattern: wc.pattern });
+                const wcMap = this.projects.getProjectMap(projectName);
+                const relKey = path.relative(wcMap.destinationRoot, absoluteWcDest);
+                await this.projects.addFileToMap(projectName, relKey, '{root}' + path.sep + relKey);
+              } catch (err) {
+                runResult.errors.push({ filename, error: 'Wildcard deploy: ' + err.message });
+              }
+              continue;
+            }
+
+            // ── Unmatched ─────────────────────────────────────────────────
+            const unmatchedDir = path.join(project.projectDir, 'NewFilesDetected');
+            await fs.ensureDir(unmatchedDir);
+            await fs.copy(fullPath, path.join(unmatchedDir, filename), { overwrite: true });
+            runResult.filesUnmatched.push({
+              filename, placedAt: path.join(unmatchedDir, filename),
+              suggestion: 'Manually place this file and update the project map'
+            });
             continue;
           }
-
-          // ── Unmatched file ────────────────────────────────────────────────
-          const unmatchedDir = path.join(project.projectDir, 'NewFilesDetected');
-          await fs.ensureDir(unmatchedDir);
-          const unmatchedDest = path.join(unmatchedDir, filename);
-          await fs.copy(fullPath, unmatchedDest, { overwrite: true });
-          runResult.filesUnmatched.push({
-            filename,
-            placedAt: unmatchedDest,
-            suggestion: 'Manually place this file and update the project map'
-          });
-          continue;
         }
 
         const absoluteDest = this.projects.resolveDestination(projectName, tokenizedDest);

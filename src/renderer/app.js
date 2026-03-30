@@ -404,7 +404,10 @@ function renderProjectDetail(details) {
     <div class="detail-card">
       <div class="detail-card-header">
         <div class="detail-card-title">PROJECT INFO</div>
-        <button class="btn-open-root" id="btnOpenProjectFolder" style="font-size:11px;padding:4px 10px">📂 Open Folder</button>
+        <div style="display:flex;gap:6px">
+          <button class="btn-open-root" id="btnOpenProjectFolder" style="font-size:11px;padding:4px 8px">📁 Project</button>
+          <button class="btn-open-root" id="btnOpenDestFolder" style="font-size:11px;padding:4px 8px">📂 Destination</button>
+        </div>
       </div>
       <div class="detail-card-body" style="padding:10px 16px">
         <table class="info-table">
@@ -584,6 +587,7 @@ function renderProjectDetail(details) {
   // ── Bind buttons ──────────────────────────────────────────────────────────
   on('btnEditExclusions', 'click', () => openExclusionsModal(details.name));
   on('btnOpenProjectFolder', 'click', () => zm.openProjectFolder(details.name));
+  on('btnOpenDestFolder',    'click', () => zm.openDestFolder(details.name));
 
   // Wildcard: add
   on('btnAddWildcard', 'click', () => openWildcardModal(details.name, null));
@@ -663,17 +667,24 @@ function renderProjectDetail(details) {
       return null;
     }
 
-    const entriesHtml = fileEntries.map(([filename, dest]) => {
-      const info = filesWithSizes[filename] || {};
+    const entriesHtml = fileEntries.map(([relKey, dest]) => {
+      // relKey is now relative path e.g. "src\components\index.ts"
+      const filename = relKey.split(/[/\\]/).pop();
+      const relDir   = relKey.includes('\\') || relKey.includes('/')
+        ? relKey.substring(0, relKey.lastIndexOf(relKey.includes('\\') ? '\\' : '/'))
+        : '';
+      const info = filesWithSizes[relKey] || filesWithSizes[filename] || {};
       const isExcluded = excludedFilesSet.has(filename.toLowerCase());
       const matchingWildcard = getWildcardForFile(filename);
       const size = isExcluded ? '—' : (info.size != null
         ? (info.size < 1024 ? info.size+'B' : info.size < 1048576 ? (info.size/1024).toFixed(1)+'KB' : (info.size/1048576).toFixed(2)+'MB')
         : '—');
       return `
-        <div class="map-entry ${isExcluded ? 'map-entry-excluded' : ''}" data-filename="${escapeHtml(filename)}" data-dest="${escapeHtml(dest)}">
-          <div class="map-col-name map-entry-name">${escapeHtml(filename)}${collisions.includes(filename) ? ' <span class="map-collision-tag">!</span>' : ''}</div>
-          <div class="map-col-dest map-entry-dest ${isExcluded ? 'excluded-path' : ''}">${isExcluded ? 'excluded' : escapeHtml(dest)}</div>
+        <div class="map-entry ${isExcluded ? 'map-entry-excluded' : ''}" data-filename="${escapeHtml(relKey)}" data-dest="${escapeHtml(dest)}">
+          <div class="map-col-name map-entry-name">${escapeHtml(filename)}</div>
+          <div class="map-col-dest map-entry-dest ${isExcluded ? 'excluded-path' : ''}">
+            ${isExcluded ? 'excluded' : (relDir ? `<span style="color:var(--text-muted);font-size:10px">${escapeHtml(relDir)}</span>` : escapeHtml(dest))}
+          </div>
           <div class="map-col-size">${size}</div>
           <div class="map-col-wildcard">${matchingWildcard ? `<span class="wildcard-match-tag" title="Matched by wildcard">${escapeHtml(matchingWildcard)}</span>` : ''}</div>
         </div>
@@ -1256,7 +1267,12 @@ async function handleDashboardDrop(e, el, projectName) {
     }
 
     if (res.action === 'conflict') {
-      showConflictDialog(res.filename, res.filePath, res.conflicts);
+      if (res.type === 'path') {
+        // Same file in multiple folders within one project
+        showPathConflictDialog(res.filename, res.filePath, projectName, res.conflicts);
+      } else {
+        showConflictDialog(res.filename, res.filePath, res.conflicts);
+      }
       return;
     }
 
@@ -1268,6 +1284,28 @@ async function handleDashboardDrop(e, el, projectName) {
     applyState(newState);
     renderRunSummary(projectName, result);
   }
+}
+
+function showPathConflictDialog(filename, filePath, projectName, conflicts) {
+  // conflicts = [{ project, relKey, dest }]
+  const options = conflicts.map(c => c.relKey).join('\n');
+  const choice = window.prompt(
+    '"' + filename + '" exists in multiple folders:\n\n' +
+    conflicts.map((c, i) => (i+1) + '. ' + c.relKey).join('\n') +
+    '\n\nEnter the number of the destination to use:'
+  );
+  if (!choice || !choice.trim()) return;
+  const idx = parseInt(choice.trim(), 10) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= conflicts.length) { alert('Invalid selection.'); return; }
+  const chosen = conflicts[idx];
+  zm.resolveConflict(projectName, filename, filePath).then(async res => {
+    // We need a specific resolve — re-call handleDrop won't work for path conflicts
+    // Instead call a targeted deploy
+    if (res.success) {
+      const newState = await zm.getState();
+      applyState(newState);
+    }
+  });
 }
 
 function showConflictDialog(filename, filePath, projectNames) {

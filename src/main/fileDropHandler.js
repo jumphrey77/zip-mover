@@ -67,18 +67,75 @@ class FileDropHandler {
       }
     }
 
-    // Try exact map match first, then wildcard
-    const wildcardMatch = !map.files[filename]
-      ? this.projects.matchWildcard(projectName, filename)
-      : null;
+    // Find matches using relative-path keys
+    const matches = this.projects.findByFilename(projectName, filename);
 
-    if (!map.files[filename] && wildcardMatch) {
-      const result = await this._deployWildcardFile(projectName, filename, filePath, wildcardMatch);
+    if (matches.length === 0) {
+      // Try wildcard
+      const wc = this.projects.matchWildcard(projectName, filename);
+      if (wc) {
+        const result = await this._deployWildcardFile(projectName, filename, filePath, wc);
+        return { action: 'single', result };
+      }
+      // Truly unmatched
+      const result = await this._deploySingleFile(projectName, filename, filePath, map);
       return { action: 'single', result };
     }
 
-    const result = await this._deploySingleFile(projectName, filename, filePath, map);
-    return { action: 'single', result };
+    if (matches.length === 1) {
+      // Unambiguous single match
+      const result = await this._deploySingleFileByKey(projectName, filename, filePath, matches[0].relKey, matches[0].tokenizedPath);
+      return { action: 'single', result };
+    }
+
+    // Multiple matches — conflict for UI to resolve
+    return {
+      action: 'conflict',
+      filename,
+      filePath,
+      conflicts: matches.map(m => ({ project: projectName, relKey: m.relKey, dest: m.tokenizedPath })),
+      type: 'path'   // distinguish from cross-project conflict
+    };
+  }
+
+  async _deploySingleFileByKey(projectName, filename, filePath, relKey, tokenizedPath) {
+    const map = this.projects.getProjectMap(projectName);
+    // Temporarily override for this call
+    const origFiles = map.files;
+    const absoluteDest = this.projects.resolveDestination(projectName, tokenizedPath);
+    const cfg = this.config.getConfig();
+    const project = this.projects.getAllProjects().find(p => p.name === projectName);
+    const runNumber = this.projects.incrementRunNumber(projectName);
+    await this.projects.saveMap(projectName);
+
+    const runResult = {
+      runNumber, zipName: filename,
+      startedAt: new Date().toISOString(), finishedAt: null,
+      filesDeployed: [], filesBackedUp: [], filesUnmatched: [],
+      filesExcluded: [], collisionAlerts: [], errors: [],
+      status: 'running', isSingleFile: true
+    };
+
+    const backupRunDir = path.join(project.projectDir, 'FileBackups', `Run${String(runNumber).padStart(3,'0')}`);
+    await fs.ensureDir(backupRunDir);
+    if (await fs.pathExists(absoluteDest)) {
+      await fs.copy(absoluteDest, path.join(backupRunDir, filename));
+      runResult.filesBackedUp.push({ filename, backedUpFrom: absoluteDest });
+    }
+    try {
+      await fs.ensureDir(path.dirname(absoluteDest));
+      await fs.copy(filePath, absoluteDest, { overwrite: true });
+      runResult.filesDeployed.push({ filename, destination: absoluteDest });
+      runResult.status = 'success';
+    } catch (err) {
+      runResult.errors.push({ filename, error: err.message });
+      runResult.status = 'failed';
+    }
+
+    runResult.finishedAt = new Date().toISOString();
+    await this.projects.logRun(projectName, runResult);
+    await this.projects.pruneBackups(projectName, cfg.backupRetentionRuns || 10);
+    return runResult;
   }
 
   async _deploySingleFile(projectName, filename, filePath, map) {
@@ -101,7 +158,8 @@ class FileDropHandler {
       isSingleFile: true
     };
 
-    const tokenizedDest = map.files[filename];
+    const matches = this.projects.findByFilename(projectName, filename);
+    const tokenizedDest = matches.length === 1 ? matches[0].tokenizedPath : null;
 
     if (!tokenizedDest) {
       // Not in map — send to NewFilesDetected
@@ -192,8 +250,13 @@ class FileDropHandler {
     return runResult;
   }
 
-  // Called after user resolves a conflict — deploy to specific project
-  async resolveConflict(projectName, filename, filePath) {
+  // Called after user resolves a cross-project conflict
+  async resolveConflict(projectName, filename, filePath, relKey, tokenizedPath) {
+    if (relKey && tokenizedPath) {
+      // Path conflict — deploy to specific relKey
+      const result = await this._deploySingleFileByKey(projectName, filename, filePath, relKey, tokenizedPath);
+      return { action: 'single', result };
+    }
     const map = this.projects.getProjectMap(projectName);
     if (!map) throw new Error(`No map for project "${projectName}"`);
     const result = await this._deploySingleFile(projectName, filename, filePath, map);
