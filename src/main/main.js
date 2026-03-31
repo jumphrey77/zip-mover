@@ -38,10 +38,7 @@ function createWindow() {
   if (process.argv.includes('--dev')) mainWindow.webContents.openDevTools();
 
   // CRITICAL: Prevent Electron from navigating to dropped files.
-  // Without this, dropping a file onto the window causes a page reload
-  // before any drop event handler in the renderer can fire.
   mainWindow.webContents.on('will-navigate', (e, url) => {
-    // Block any navigation that isn't our own app html
     if (!url.startsWith('file://') || !url.endsWith('index.html')) {
       e.preventDefault();
     }
@@ -81,7 +78,6 @@ async function bootManagers() {
     sendToMain('watcher-event', event);
     compactWindowManager.send('watcher-event', event);
     if (event.type === 'run-complete') {
-      // Refresh state first so renderer gets up-to-date lastRun/fileCount
       sendStateUpdate();
       sendToMain('run-complete', { projectName: event.projectName, result: event.result });
       compactWindowManager.send('run-complete', { projectName: event.projectName, result: event.result });
@@ -92,7 +88,6 @@ async function bootManagers() {
   });
   const projects = projectManager.getAllProjects();
   for (const p of projects) watcherManager.startWatcher(p.name);
-  // Don't sendStateUpdate here — renderer fetches state via get-state after appReady
 }
 
 function sendToMain(channel, data) {
@@ -235,19 +230,18 @@ ipcMain.handle('clear-zip-archive', async (event, { name }) => {
   try {
     const p = projectManager.getAllProjects().find(p => p.name === name);
     if (!p) throw new Error('Project not found');
-    const archiveDir = require('path').join(p.projectDir, 'ZipArchive');
+    const archiveDir = path.join(p.projectDir, 'ZipArchive');
     const files = await fs.readdir(archiveDir).catch(() => []);
-    for (const f of files) await fs.remove(require('path').join(archiveDir, f));
+    for (const f of files) await fs.remove(path.join(archiveDir, f));
     return { success: true, count: files.length };
   } catch (err) { return { success: false, error: err.message }; }
 });
 
-// Browse for a destination folder (for unmatched file copy)
 ipcMain.handle('get-unmatched-files', async (event, { name }) => {
   try {
     const p = projectManager.getAllProjects().find(p => p.name === name);
     if (!p) return { success: true, files: [] };
-    const dir = require('path').join(p.projectDir, 'NewFilesDetected');
+    const dir = path.join(p.projectDir, 'NewFilesDetected');
     if (!(await fs.pathExists(dir))) return { success: true, files: [] };
     const entries = await fs.readdir(dir, { withFileTypes: true });
     const files = entries.filter(e => e.isFile()).map(e => e.name);
@@ -267,27 +261,23 @@ ipcMain.handle('browse-for-dest', async (event, { initialPath }) => {
   } catch (err) { return { success: false, error: err.message }; }
 });
 
-// Copy an unmatched file to a chosen folder and add it to the map
 ipcMain.handle('place-unmatched-file', async (event, { projectName, filename, destFolder }) => {
   try {
     const p = projectManager.getAllProjects().find(p => p.name === projectName);
     if (!p) throw new Error('Project not found');
 
-    const srcPath  = require('path').join(p.projectDir, 'NewFilesDetected', filename);
-    const destPath = require('path').join(destFolder, filename);
+    const srcPath  = path.join(p.projectDir, 'NewFilesDetected', filename);
+    const destPath = path.join(destFolder, filename);
 
     if (!(await fs.pathExists(srcPath))) throw new Error('Source file not found: ' + srcPath);
 
-    // Copy to destination
     await fs.copy(srcPath, destPath, { overwrite: true });
 
-    // Add to map using relative path key
     const map = projectManager.getProjectMap(projectName);
-    const relKey = require('path').relative(map.destinationRoot, destPath);
-    const tokenized = '{root}' + require('path').sep + relKey;
+    const relKey = path.relative(map.destinationRoot, destPath);
+    const tokenized = '{root}' + path.sep + relKey;
     await projectManager.addFileToMap(projectName, relKey, tokenized);
 
-    // Remove from NewFilesDetected
     await fs.remove(srcPath);
 
     sendStateUpdate();
@@ -299,7 +289,7 @@ ipcMain.handle('get-zip-archive-count', async (event, { name }) => {
   try {
     const p = projectManager.getAllProjects().find(p => p.name === name);
     if (!p) return { success: true, count: 0 };
-    const archiveDir = require('path').join(p.projectDir, 'ZipArchive');
+    const archiveDir = path.join(p.projectDir, 'ZipArchive');
     const files = await fs.readdir(archiveDir).catch(() => []);
     return { success: true, count: files.filter(f => f.endsWith('.zip')).length };
   } catch (err) { return { success: false, error: err.message }; }
@@ -309,9 +299,12 @@ ipcMain.handle('clear-run-log', async (event, { name }) => {
   try {
     const p = projectManager.getAllProjects().find(p => p.name === name);
     if (!p) throw new Error('Project not found');
-    const logPath = require('path').join(p.projectDir, 'config', 'run_log.json');
+    const logPath = path.join(p.projectDir, 'config', 'run_log.json');
     await fs.writeJson(logPath, []);
-    // Reset nextRunNumber in map too
+    // ── BUG 6 FIX: Reset lastRun in memory BEFORE sendStateUpdate ────────────
+    // Old code called resetRunNumber() which resets the map but logRun() had
+    // already updated projects[name].lastRun — dashboard still showed old date.
+    // Fix: reset directly on the project object first, then persist.
     await projectManager.resetRunNumber(name);
     sendStateUpdate();
     return { success: true };
@@ -380,13 +373,12 @@ ipcMain.handle('get-map-with-sizes', async (event, { name }) => {
   try {
     const map = projectManager.getProjectMap(name);
     if (!map) return { success: false, error: 'No map found' };
-    const fs2 = require('fs-extra');
     const filesWithSizes = {};
-    for (const [filename, tokenizedPath] of Object.entries(map.files || {})) {
+    for (const [relKey, tokenizedPath] of Object.entries(map.files || {})) {
       const absPath = projectManager.resolveDestination(name, tokenizedPath);
       let size = null;
-      try { const stat = await fs2.stat(absPath); size = stat.size; } catch (_) {}
-      filesWithSizes[filename] = { dest: tokenizedPath, size };
+      try { const stat = await fs.stat(absPath); size = stat.size; } catch (_) {}
+      filesWithSizes[relKey] = { dest: tokenizedPath, size };
     }
     return { success: true, map: { ...map, filesWithSizes } };
   } catch (err) { return { success: false, error: err.message }; }

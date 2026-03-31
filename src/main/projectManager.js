@@ -13,32 +13,25 @@ class ProjectManager {
 
   async init() {
     const appRoot = this.config.getAppRoot();
-    console.log('[ProjectManager] init — appRoot:', appRoot);
     await fs.ensureDir(appRoot);
     const entries = await fs.readdir(appRoot, { withFileTypes: true });
-    console.log('[ProjectManager] entries in appRoot:', entries.map(e => e.name));
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      // Check both config\ (new) and root (old, will be migrated)
       const mapNew = path.join(appRoot, entry.name, 'config', 'project_map.json');
       const mapOld = path.join(appRoot, entry.name, 'project_map.json');
       if (await fs.pathExists(mapNew) || await fs.pathExists(mapOld)) {
         await this._loadProject(entry.name);
-        console.log('[ProjectManager] loaded project:', entry.name);
       }
     }
-    console.log('[ProjectManager] total projects loaded:', Object.keys(this.projects).length);
   }
 
   async _loadProject(name) {
     const projectDir = this._projectDir(name);
-    // ── Auto-migrate: move map/log from project root → config\ ───────────────
     await this._migrateToConfigFolder(name);
 
     const mapPath = this._mapPath(name);
     try {
       const map = await fs.readJson(mapPath);
-      // ── Migration: upgrade old filename-keyed maps to relative-path keys ──
       map.files = this._migrateMapKeys(map.files || {}, map.destinationRoot);
       this.maps[name] = map;
       this.projects[name] = {
@@ -62,31 +55,25 @@ class ProjectManager {
     const configDir  = this._configDir(name);
     await fs.ensureDir(configDir);
 
-    const oldMap    = path.join(projectDir, 'project_map.json');
-    const oldLog    = path.join(projectDir, 'run_log.json');
-    const newMap    = this._mapPath(name);
-    const newLog    = this._runLogPath(name);
+    const oldMap = path.join(projectDir, 'project_map.json');
+    const oldLog = path.join(projectDir, 'run_log.json');
+    const newMap = this._mapPath(name);
+    const newLog = this._runLogPath(name);
 
     if (await fs.pathExists(oldMap) && !(await fs.pathExists(newMap))) {
       await fs.move(oldMap, newMap);
-      console.log(`[Migration] Moved project_map.json → config\ for "${name}"`);
     }
     if (await fs.pathExists(oldLog) && !(await fs.pathExists(newLog))) {
       await fs.move(oldLog, newLog);
-      console.log(`[Migration] Moved run_log.json → config\ for "${name}"`);
     }
   }
 
-  // ── Migration helper: detect old-style filename-only keys and warn ─────────
-  // Old maps had keys like "index.ts" → "{root}\src\index.ts"
-  // New maps have keys like "src\index.ts" → "{root}\src\index.ts"
+  // Migration: old filename-only keys → relative-path keys
   _migrateMapKeys(files, destinationRoot) {
     const migrated = {};
     for (const [key, tokenizedPath] of Object.entries(files)) {
-      // If the key equals the filename portion of the value, it's old-style
       const valueBasename = path.basename(tokenizedPath);
       if (key === valueBasename) {
-        // Derive the relative key from the tokenized path
         const relPath = tokenizedPath
           .replace('{root}' + path.sep, '')
           .replace('{root}/', '');
@@ -197,7 +184,6 @@ class ProjectManager {
 
   async _buildMap(name, destinationRoot, excludedFolders = []) {
     const files = {};
-    // No more collision tracking needed — relative path keys are unique
     const excludedSet = new Set(excludedFolders.map(f => f.toLowerCase()));
 
     const scan = async (dir, isRoot = false) => {
@@ -211,8 +197,7 @@ class ProjectManager {
           if (isRoot && excludedSet.has(entry.name.toLowerCase())) continue;
           await scan(fullPath, false);
         } else if (entry.isFile()) {
-          // KEY = relative path (e.g. "src\components\index.ts")
-          const relKey  = path.relative(destinationRoot, fullPath);
+          const relKey = path.relative(destinationRoot, fullPath);
           const tokenizedPath = '{root}' + path.sep + relKey;
           files[relKey] = tokenizedPath;
         }
@@ -230,7 +215,7 @@ class ProjectManager {
       nextRunNumber:  (this.maps[name] && this.maps[name].nextRunNumber)  || 1,
       builtAt:        new Date().toISOString(),
       fileCount:      Object.keys(files).length,
-      collisions:     [],   // always empty now — relative keys are unique
+      collisions:     [],
       files
     };
 
@@ -240,8 +225,6 @@ class ProjectManager {
   }
 
   // ── Lookup helpers ────────────────────────────────────────────────────────
-  // Find all map entries whose filename portion matches a given name.
-  // Returns array of { relKey, tokenizedPath }
   findByFilename(projectName, filename) {
     const map = this.maps[projectName];
     if (!map) return [];
@@ -254,21 +237,16 @@ class ProjectManager {
     return results;
   }
 
-  // Find the best single match using zip-internal path hint
-  // zipInternalPath: e.g. "src/components/index.ts" from inside the zip
   findBestMatch(projectName, filename, zipInternalPath) {
     const matches = this.findByFilename(projectName, filename);
     if (matches.length === 0) return null;
     if (matches.length === 1) return matches[0];
 
     if (zipInternalPath) {
-      // Normalize separators
       const zipDir = path.dirname(zipInternalPath).replace(/\//g, path.sep).toLowerCase();
-      // Score each match by how much of the zip path matches the map key folder
       let best = null, bestScore = -1;
       for (const m of matches) {
         const mapDir = path.dirname(m.relKey).toLowerCase();
-        // Count matching path segments from the right
         const zipParts = zipDir.split(path.sep).filter(Boolean);
         const mapParts = mapDir.split(path.sep).filter(Boolean);
         let score = 0;
@@ -281,7 +259,7 @@ class ProjectManager {
       return best;
     }
 
-    return null;  // Ambiguous — caller must prompt user
+    return null;
   }
 
   // ── Map entry operations ──────────────────────────────────────────────────
@@ -330,12 +308,13 @@ class ProjectManager {
     return null;
   }
 
+  // ── MINOR FIX: use replaceAll() so multiple {root}/{filename} tokens work ──
   resolveWildcardDestination(projectName, wc, filename) {
     const map = this.maps[projectName];
     if (!map) return null;
     return wc.destination
-      .replace('{root}', map.destinationRoot)
-      .replace('{filename}', filename);
+      .replaceAll('{root}', map.destinationRoot)
+      .replaceAll('{filename}', filename);
   }
 
   async addWildcard(projectName, pattern, destination, description) {
@@ -386,7 +365,12 @@ class ProjectManager {
     const project = this.projects[projectName];
     if (!map) return;
     map.nextRunNumber = 1;
-    if (project) { project.nextRunNumber = 1; project.lastRun = null; }
+    // ── BUG 6 SUPPORT: Also reset lastRun on the project object ──────────────
+    // This ensures sendStateUpdate() in main.js sees null lastRun immediately
+    if (project) {
+      project.nextRunNumber = 1;
+      project.lastRun = null;
+    }
     await this.saveMap(projectName);
   }
 

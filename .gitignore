@@ -1,5 +1,6 @@
 node_modules/
 delete/
+manual-changes/
 needed-updates.txt
 .env
 *.log

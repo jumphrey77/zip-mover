@@ -53,7 +53,7 @@ class ZipProcessor {
       const zip = new AdmZip(workingZipPath);
       zip.extractAllTo(extractDir, true);
 
-      // Collect all extracted files (recursively - flatten to just filenames)
+      // Collect all extracted files (recursively)
       const extractedFiles = await this._collectFiles(extractDir);
 
       // ── Step 3: Check for map collisions (alert only) ─────────────────────
@@ -82,15 +82,13 @@ class ZipProcessor {
 
         if (!tokenizedDest) {
           // ── Try relative-path lookup using zip internal path ──────────────
-          // zipInternalPath = path inside the zip (e.g. src/components/index.ts)
           const zipInternalPath = path.relative(extractDir, fullPath);
           const bestMatch = this.projects.findBestMatch(projectName, filename, zipInternalPath);
 
           if (bestMatch) {
-            // Unambiguous best match found
             tokenizedDest = bestMatch.tokenizedPath;
           } else {
-            // Check if there are multiple matches (ambiguous) — log for UI conflict
+            // Check if there are multiple matches (ambiguous)
             const allMatches = this.projects.findByFilename(projectName, filename);
             if (allMatches.length > 1) {
               runResult.filesUnmatched.push({
@@ -111,8 +109,14 @@ class ZipProcessor {
                 await fs.ensureDir(path.dirname(absoluteWcDest));
                 await fs.copy(fullPath, absoluteWcDest, { overwrite: true });
                 runResult.filesDeployed.push({ filename, source: fullPath, destination: absoluteWcDest, wildcardPattern: wc.pattern });
+
+                // ── BUG 5 FIX: Guard against absolute path when dest is outside destinationRoot ──
                 const wcMap = this.projects.getProjectMap(projectName);
-                const relKey = path.relative(wcMap.destinationRoot, absoluteWcDest);
+                let relKey = path.relative(wcMap.destinationRoot, absoluteWcDest);
+                if (path.isAbsolute(relKey)) {
+                  // absoluteWcDest is outside destinationRoot — use filename as fallback key
+                  relKey = filename;
+                }
                 await this.projects.addFileToMap(projectName, relKey, '{root}' + path.sep + relKey);
               } catch (err) {
                 runResult.errors.push({ filename, error: 'Wildcard deploy: ' + err.message });
@@ -178,7 +182,6 @@ class ZipProcessor {
     } catch (err) {
       runResult.errors.push({ filename: 'FATAL', error: err.message });
       runResult.status = 'failed';
-      // Clean up working dir on failure too
       try { await fs.remove(workingDir); } catch (_) {}
     }
 

@@ -8,10 +8,10 @@ class WatcherManager {
   constructor(projectManager, zipProcessor, onEvent) {
     this.projects = projectManager;
     this.processor = zipProcessor;
-    this.onEvent = onEvent;   // Callback to send events to renderer
-    this.watchers = {};       // name -> chokidar watcher
-    this.status = {};         // name -> { active, lastEvent }
-    this.debounceTimers = {}; // name+file -> timer
+    this.onEvent = onEvent;
+    this.watchers = {};
+    this.status = {};
+    this.debounceTimers = {};
   }
 
   startWatcher(projectName) {
@@ -32,6 +32,7 @@ class WatcherManager {
         /ZipArchive/,
         /NewFilesDetected/,
         /WorkingRun/,
+        /[/\\]config[/\\]/,        // config\ subfolder (project_map.json, run_log.json)
         /project_map\.json/,
         /run_log\.json/
       ],
@@ -39,7 +40,7 @@ class WatcherManager {
       ignoreInitial: true,
       depth: 0,                    // Only watch root of project folder
       awaitWriteFinish: {
-        stabilityThreshold: 1500,  // Wait for file to finish writing
+        stabilityThreshold: 1500,
         pollInterval: 200
       }
     });
@@ -100,7 +101,6 @@ class WatcherManager {
   }
 
   _handleZipDetected(projectName, zipPath) {
-    // Debounce - in case multiple events fire for the same file
     const key = `${projectName}::${zipPath}`;
     if (this.debounceTimers[key]) {
       clearTimeout(this.debounceTimers[key]);

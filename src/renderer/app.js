@@ -46,7 +46,6 @@ const els = {
 };
 
 let mapEntryCallback = null;   // Used by map entry modal
-let pendingUnmatchedFile = null;
 
 // ─── Utility ─────────────────────────────────────────────────────────────────
 
@@ -532,26 +531,8 @@ function renderProjectDetail(details) {
   `;
 
   // ── EXCLUDED FILES ─────────────────────────────────────────────────────────
-  const excludedFiles = map.excludedFiles || [];
-  const excludedFilesHtml = `
-    <div class="detail-card">
-      <div class="detail-card-header">
-        <div class="detail-card-title">EXCLUDED FILES</div>
-        <button class="btn-edit-exclusions" id="btnAddExcludedFile">+ Add</button>
-      </div>
-      <div class="detail-card-body">
-        ${excludedFiles.length === 0
-          ? '<div style="color:var(--text-muted);font-size:12px">No files excluded. Click + Add to exclude files like <code style=\'color:var(--accent);\'>.gitignore</code> from deployment.</div>'
-          : excludedFiles.map(f => `
-              <div class="excluded-file-row">
-                <span class="excluded-file-name">${escapeHtml(f)}</span>
-                <button class="btn-remove-excluded" data-file="${escapeHtml(f)}">✕</button>
-              </div>`).join('')
-        }
-      </div>
-    </div>
-  `;
-
+  // Excluded files managed via Edit Exclusions modal (see btnEditExclusions)
+  
   // ── WILDCARDS ──────────────────────────────────────────────────────────────
   const wildcards = map.wildcards || [];
   const wildcardsHtml = `
@@ -915,13 +896,13 @@ function getCheckedFolderNames(containerId) {
   return excluded;
 }
 
-function getExclusionCheckedNames(containerId, folderData) {
-  const excluded = [];
-  $(containerId).querySelectorAll('input[type="checkbox"]').forEach((cb, i) => {
-    if (!cb.checked) excluded.push(folderData[i].name);
-  });
-  return excluded;
-}
+//function getExclusionCheckedNames(containerId, folderData) {
+//  const excluded = [];
+//  $(containerId).querySelectorAll('input[type="checkbox"]').forEach((cb, i) => {
+//    if (!cb.checked) excluded.push(folderData[i].name);
+//  });
+//  return excluded;
+//}
 
 async function createProject() {
   const name = els.inputProjectName.value.trim();
@@ -1307,15 +1288,12 @@ async function handleDashboardDrop(e, el, projectName) {
     try { filePath = zm.getPathForFile(file); } catch (_) {}
     if (!filePath) filePath = file.path || null;
 
-    console.log('[Drop] file.name:', file.name, '| resolved path:', filePath);
-
     if (!filePath) {
       el.classList.remove('drop-processing');
       showAlert('alert-danger', 'Drop Failed', `Could not resolve path for "${escapeHtml(file.name)}". Open DevTools (Ctrl+Shift+I) and check console for details.`, true);
       continue;
     }
     const res = await zm.handleDrop(projectName, filePath);
-    console.log('[Drop] handleDrop result:', JSON.stringify({ success: res.success, action: res.action, status: res.result && res.result.status }));
     el.classList.remove('drop-processing');
 
     if (!res.success) {
@@ -1356,14 +1334,13 @@ function showPathConflictDialog(filename, filePath, projectName, conflicts) {
   const idx = parseInt(choice.trim(), 10) - 1;
   if (isNaN(idx) || idx < 0 || idx >= conflicts.length) { alert('Invalid selection.'); return; }
   const chosen = conflicts[idx];
-  zm.resolveConflict(projectName, filename, filePath).then(async res => {
-    // We need a specific resolve — re-call handleDrop won't work for path conflicts
-    // Instead call a targeted deploy
-    if (res.success) {
-      const newState = await zm.getState();
-      applyState(newState);
-    }
-  });
+    zm.resolvePathConflict(projectName, filename, filePath, chosen.relKey).then(async res => {
+      if (res.success) {
+        const newState = await zm.getState();
+        applyState(newState);
+        if (res.result) renderRunSummary(projectName, res.result);
+      }
+    });
 }
 
 function showConflictDialog(filename, filePath, projectNames) {
@@ -1458,11 +1435,6 @@ function bindEvents() {
   document.addEventListener('drop',      e => {
     e.preventDefault();
     e.stopPropagation();
-    // If a file lands on the document body (missed the zone), log it
-    if (!e.target.closest('.drop-zone-target')) {
-      console.log('[Drop] Missed zone — landed on:', e.target.className || e.target.tagName,
-        '| files:', Array.from(e.dataTransfer.files).map(f => f.name));
-    }
   });
 
   // Setup screen
@@ -1664,12 +1636,6 @@ async function init() {
 
   try {
     const initialState = await zm.getState();
-    console.log('[Renderer] get-state returned:', JSON.stringify({
-      projectCount: initialState.projects ? initialState.projects.length : 'undefined',
-      needsSetup: initialState.needsSetup,
-      hasConfig: !!initialState.config,
-      appVersion: initialState.appVersion
-    }));
     if (initialState.needsSetup) {
       hideLoading();
       showSetupScreen();

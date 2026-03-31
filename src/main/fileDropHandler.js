@@ -43,12 +43,14 @@ class FileDropHandler {
     const map = this.projects.getProjectMap(projectName);
     if (!map) throw new Error(`No map for project "${projectName}"`);
 
-    // Check ALL projects for this filename to detect cross-project conflicts
+    // ── BUG 3 FIX: Cross-project conflict detection ───────────────────────────
+    // Old code used m.files[filename] (bare filename key) — broken after relKey refactor
+    // Fix: use findByFilename() which searches by path.basename(relKey)
     const allProjects = this.projects.getAllProjects();
     const matchingProjects = allProjects.filter(p => {
       if (!p.name) return false;
-      const m = this.projects.getProjectMap(p.name);
-      return m && m.files && m.files[filename];
+      const matches = this.projects.findByFilename(p.name, filename);
+      return matches.length > 0;
     });
 
     // If multiple DROP-enabled projects match, return conflict for UI to resolve
@@ -77,8 +79,8 @@ class FileDropHandler {
         const result = await this._deployWildcardFile(projectName, filename, filePath, wc);
         return { action: 'single', result };
       }
-      // Truly unmatched
-      const result = await this._deploySingleFile(projectName, filename, filePath, map);
+      // Truly unmatched — send to NewFilesDetected
+      const result = await this._deployUnmatched(projectName, filename, filePath, map);
       return { action: 'single', result };
     }
 
@@ -88,20 +90,17 @@ class FileDropHandler {
       return { action: 'single', result };
     }
 
-    // Multiple matches — conflict for UI to resolve
+    // Multiple matches within same project — path conflict for UI to resolve
     return {
       action: 'conflict',
       filename,
       filePath,
       conflicts: matches.map(m => ({ project: projectName, relKey: m.relKey, dest: m.tokenizedPath })),
-      type: 'path'   // distinguish from cross-project conflict
+      type: 'path'
     };
   }
 
   async _deploySingleFileByKey(projectName, filename, filePath, relKey, tokenizedPath) {
-    const map = this.projects.getProjectMap(projectName);
-    // Temporarily override for this call
-    const origFiles = map.files;
     const absoluteDest = this.projects.resolveDestination(projectName, tokenizedPath);
     const cfg = this.config.getConfig();
     const project = this.projects.getAllProjects().find(p => p.name === projectName);
@@ -138,7 +137,8 @@ class FileDropHandler {
     return runResult;
   }
 
-  async _deploySingleFile(projectName, filename, filePath, map) {
+  async _deployUnmatched(projectName, filename, filePath, map) {
+    // File has no map entry — send to NewFilesDetected
     const cfg = this.config.getConfig();
     const project = this.projects.getAllProjects().find(p => p.name === projectName);
     const runNumber = this.projects.incrementRunNumber(projectName);
@@ -146,7 +146,7 @@ class FileDropHandler {
 
     const runResult = {
       runNumber,
-      zipName: filename,  // Re-use zipName field for display
+      zipName: filename,
       startedAt: new Date().toISOString(),
       finishedAt: null,
       filesDeployed: [],
@@ -158,38 +158,11 @@ class FileDropHandler {
       isSingleFile: true
     };
 
-    const matches = this.projects.findByFilename(projectName, filename);
-    const tokenizedDest = matches.length === 1 ? matches[0].tokenizedPath : null;
-
-    if (!tokenizedDest) {
-      // Not in map — send to NewFilesDetected
-      const unmatchedDir = path.join(project.projectDir, 'NewFilesDetected');
-      await fs.ensureDir(unmatchedDir);
-      await fs.copy(filePath, path.join(unmatchedDir, filename), { overwrite: true });
-      runResult.filesUnmatched.push({ filename, suggestion: 'Update map to deploy next time' });
-      runResult.status = 'completed_with_errors';
-    } else {
-      const absoluteDest = this.projects.resolveDestination(projectName, tokenizedDest);
-
-      // Backup
-      const backupRunDir = path.join(project.projectDir, 'FileBackups', `Run${String(runNumber).padStart(3,'0')}`);
-      await fs.ensureDir(backupRunDir);
-      if (await fs.pathExists(absoluteDest)) {
-        await fs.copy(absoluteDest, path.join(backupRunDir, filename));
-        runResult.filesBackedUp.push({ filename, backedUpFrom: absoluteDest });
-      }
-
-      // Deploy
-      try {
-        await fs.ensureDir(path.dirname(absoluteDest));
-        await fs.copy(filePath, absoluteDest, { overwrite: true });
-        runResult.filesDeployed.push({ filename, destination: absoluteDest });
-        runResult.status = 'success';
-      } catch (err) {
-        runResult.errors.push({ filename, error: err.message });
-        runResult.status = 'failed';
-      }
-    }
+    const unmatchedDir = path.join(project.projectDir, 'NewFilesDetected');
+    await fs.ensureDir(unmatchedDir);
+    await fs.copy(filePath, path.join(unmatchedDir, filename), { overwrite: true });
+    runResult.filesUnmatched.push({ filename, suggestion: 'Update map to deploy next time' });
+    runResult.status = 'completed_with_errors';
 
     runResult.finishedAt = new Date().toISOString();
     await this.projects.logRun(projectName, runResult);
@@ -223,9 +196,7 @@ class FileDropHandler {
 
     try {
       await fs.ensureDir(path.dirname(absoluteDest));
-      // Place the new file — do NOT overwrite differently-named existing files
-      // (old versions stay alongside the new one)
-      await fs.copy(filePath, absoluteDest, { overwrite: true });  // overwrite only if same name
+      await fs.copy(filePath, absoluteDest, { overwrite: true });
 
       runResult.filesDeployed.push({
         filename,
@@ -234,10 +205,18 @@ class FileDropHandler {
       });
       runResult.status = 'success';
 
-      // Add to permanent file map so future drops match exactly
+      // ── BUG 4 FIX: Add to map using relKey (relative path), not bare filename ──
+      // Old: addFileToMap(projectName, filename, tokenizedPath)  ← bare filename key
+      // Fix: derive proper relKey via path.relative, guard against outside-root paths
       const map = this.projects.getProjectMap(projectName);
-      const tokenizedPath = absoluteDest.replace(map.destinationRoot, '{root}');
-      await this.projects.addFileToMap(projectName, filename, tokenizedPath);
+      let relKey = path.relative(map.destinationRoot, absoluteDest);
+      // path.relative returns an absolute path on Windows if dest is outside root
+      if (path.isAbsolute(relKey)) {
+        // Fallback: use just the filename as relKey — not ideal but safe
+        relKey = filename;
+      }
+      const tokenizedPath = '{root}' + path.sep + relKey;
+      await this.projects.addFileToMap(projectName, relKey, tokenizedPath);
 
     } catch (err) {
       runResult.errors.push({ filename, error: err.message });
@@ -259,7 +238,7 @@ class FileDropHandler {
     }
     const map = this.projects.getProjectMap(projectName);
     if (!map) throw new Error(`No map for project "${projectName}"`);
-    const result = await this._deploySingleFile(projectName, filename, filePath, map);
+    const result = await this._deployUnmatched(projectName, filename, filePath, map);
     return { action: 'single', result };
   }
 }
