@@ -454,6 +454,9 @@ function renderProjectDetail(details) {
     ? allExcluded.map(e => `<span class="exclusion-tag exclusion-tag-${e.type}" title="${e.type === 'file' ? 'Excluded file' : 'Excluded folder'}">${escapeHtml(e.name)}</span>`).join(' ')
     : '<span style="color:var(--text-muted);font-size:11px">None</span>';
 
+  const _watchFolder   = details.watchFolder || details.projectDir || '';
+  const _isCustomWatch = _watchFolder && _watchFolder !== details.projectDir;
+
   const infoHtml = `
     <div class="detail-card">
       <div class="detail-card-header">
@@ -461,23 +464,17 @@ function renderProjectDetail(details) {
         <div style="display:flex;gap:6px">
           <button class="btn-open-root" id="btnOpenProjectFolder" style="font-size:11px;padding:4px 8px">📁 Project</button>
           <button class="btn-open-root" id="btnOpenDestFolder" style="font-size:11px;padding:4px 8px">📂 Destination</button>
+          <button class="btn-edit-exclusions" id="btnEditProject">⚙ Edit…</button>
         </div>
       </div>
       <div class="detail-card-body" style="padding:10px 16px">
         <table class="info-table">
+          <tr><td>Display Name</td><td>${escapeHtml(details.displayName || details.name)}</td></tr>
           <tr><td>Destination</td><td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px" title="${escapeHtml(map.destinationRoot || '')}">${escapeHtml(map.destinationRoot || '—')}</td></tr>
+          <tr><td>Watch Folder</td><td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px" title="${escapeHtml(_watchFolder)}">${escapeHtml(_watchFolder || '—')}<span style="font-size:9px;color:var(--text-muted);margin-left:6px">${_isCustomWatch ? '(custom)' : '(default)'}</span></td></tr>
           <tr><td>Map Built</td><td>${formatDate(map.builtAt)}</td></tr>
           <tr><td>Watcher</td><td>${status.active ? '<span style="color:var(--accent)">● Active</span>' : '<span style="color:var(--text-muted)">○ Inactive</span>'}</td></tr>
           <tr><td>Next Run #</td><td>${map.nextRunNumber || 1}</td></tr>
-          <tr>
-            <td>Excluded</td>
-            <td>
-              <div class="exclusions-summary">
-                ${excludedDisplay}
-                <button class="btn-edit-exclusions" id="btnEditExclusions">Edit…</button>
-              </div>
-            </td>
-          </tr>
         </table>
       </div>
     </div>
@@ -620,7 +617,7 @@ function renderProjectDetail(details) {
   `;
 
   // ── Bind buttons ──────────────────────────────────────────────────────────
-  on('btnEditExclusions', 'click', () => openExclusionsModal(details.name));
+  on('btnEditProject', 'click', () => openEditProjectModal(details.name));
   on('btnRefreshUnmatched', 'click', () => loadUnmatchedFiles(details.name, map.destinationRoot));
 
   // Load unmatched files
@@ -1417,6 +1414,119 @@ async function saveWildcard() {
   openProject(_wildcardProjectName);
 }
 
+
+// ─── Edit Project Modal ───────────────────────────────────────────────────────
+
+let editProjectName       = null;
+let editProjectFolderData = [];
+
+async function openEditProjectModal(projectName) {
+  editProjectName = projectName;
+  const project = state.projects.find(p => p.name === projectName);
+  if (!project) return;
+
+  $('inputEditDisplayName').value  = project.displayName || project.name;
+  $('inputEditDestRoot').value     = project.destinationRoot || '';
+  $('inputEditWatchFolder').value  = project.watchFolder || project.projectDir || '';
+  $('editProjectError').style.display = 'none';
+
+  let currentExcludedFiles = [];
+  if (state.currentProjectDetails && state.currentProjectDetails.name === projectName) {
+    currentExcludedFiles = (state.currentProjectDetails.map && state.currentProjectDetails.map.excludedFiles) || [];
+  } else {
+    const mapRes = await zm.getProjectMap(projectName);
+    currentExcludedFiles = (mapRes.success && mapRes.map && mapRes.map.excludedFiles) || [];
+  }
+  $('inputEditExcludedFiles').value = currentExcludedFiles.join(', ');
+
+  editProjectFolderData = [];
+  $('editFolderChecklist').style.display        = 'none';
+  $('editFolderChecklistLoading').style.display = 'flex';
+  $('modalEditProject').style.display           = 'flex';
+
+  const foldersRes = await zm.scanRootFolders(project.destinationRoot);
+  $('editFolderChecklistLoading').style.display = 'none';
+
+  if (!foldersRes.success) {
+    $('editFolderChecklist').innerHTML      = '<div class="folder-checklist-empty">Could not scan destination folder.</div>';
+    $('editFolderChecklist').style.display  = 'flex';
+    return;
+  }
+
+  const currentExcludedFolders = new Set((project.excludedFolders || []).map(f => f.toLowerCase()));
+  editProjectFolderData = foldersRes.folders.map(name => ({
+    name,
+    excluded: currentExcludedFolders.has(name.toLowerCase())
+  }));
+
+  const container = $('editFolderChecklist');
+  container.innerHTML = editProjectFolderData.length === 0
+    ? '<div class="folder-checklist-empty">No subfolders found.</div>'
+    : editProjectFolderData.map((f, i) => `
+        <label class="folder-check-item">
+          <input type="checkbox" data-index="${i}" ${f.excluded ? '' : 'checked'} />
+          <span class="folder-check-name">${escapeHtml(f.name)}</span>
+        </label>
+      `).join('');
+  container.style.display = 'flex';
+}
+
+async function saveEditProject() {
+  if (!editProjectName) return;
+
+  const displayName    = $('inputEditDisplayName').value.trim();
+  const newDestRoot    = $('inputEditDestRoot').value.trim();
+  const newWatchFolder = $('inputEditWatchFolder').value.trim();
+
+  $('editProjectError').style.display = 'none';
+
+  if (!displayName) {
+    $('editProjectError').textContent   = 'Display name cannot be empty.';
+    $('editProjectError').style.display = 'block';
+    return;
+  }
+  if (!newDestRoot) {
+    $('editProjectError').textContent   = 'Destination root cannot be empty.';
+    $('editProjectError').style.display = 'block';
+    return;
+  }
+
+  const newExcludedFolders = [];
+  $('editFolderChecklist').querySelectorAll('input[type="checkbox"]').forEach((cb, i) => {
+    if (!cb.checked && editProjectFolderData[i]) newExcludedFolders.push(editProjectFolderData[i].name);
+  });
+
+  const filesRaw         = $('inputEditExcludedFiles').value || '';
+  const newExcludedFiles = filesRaw.split(',').map(f => f.trim()).filter(f => f.length > 0);
+
+  const project      = state.projects.find(p => p.name === editProjectName);
+  const destChanged  = newDestRoot    !== project.destinationRoot;
+  const watchChanged = newWatchFolder !== (project.watchFolder || project.projectDir);
+
+  if (destChanged) {
+    if (!confirm('Changing destination root will rebuild the entire file map.\n\nNew root: ' + newDestRoot + '\n\nContinue?')) return;
+  }
+
+  $('modalEditProject').style.display = 'none';
+  showLoading('Saving project settings…');
+
+  const updates = { displayName, excludedFiles: newExcludedFiles, excludedFolders: newExcludedFolders };
+  if (destChanged)  updates.destinationRoot = newDestRoot;
+  if (watchChanged) updates.watchFolder     = newWatchFolder;
+
+  const res = await zm.updateProject(editProjectName, updates);
+  hideLoading();
+
+  if (!res.success) {
+    showAlert('alert-danger', 'Update Failed', escapeHtml(res.error), true);
+    return;
+  }
+
+  const stateRes = await zm.getState();
+  applyState(stateRes);
+  if (state.currentProject === editProjectName) await openProject(editProjectName);
+}
+
 // ─── Event Bindings ───────────────────────────────────────────────────────────
 
 // Safe element binder — logs warning instead of crashing on missing elements
@@ -1607,6 +1717,24 @@ function bindEvents() {
 
   $('modalExclusions').addEventListener('click', e => {
     if (e.target === $('modalExclusions')) $('modalExclusions').style.display = 'none';
+  });
+
+  // Edit Project modal bindings
+  on('btnEditProjectClose',  'click', () => { $('modalEditProject').style.display = 'none'; });
+  on('btnEditProjectCancel', 'click', () => { $('modalEditProject').style.display = 'none'; });
+  on('btnEditProjectSave',   'click', saveEditProject);
+  on('btnEditDestBrowse',  'click', async () => {
+    const res = await zm.browseFolder();
+    if (res.success) $('inputEditDestRoot').value = res.path;
+  });
+  on('btnEditWatchBrowse', 'click', async () => {
+    const res = await zm.browseWatchFolder();
+    if (res.success) $('inputEditWatchFolder').value = res.path;
+  });
+  on('btnEditCheckAll',   'click', () => { $('editFolderChecklist').querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true); });
+  on('btnEditUncheckAll', 'click', () => { $('editFolderChecklist').querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false); });
+  $('modalEditProject').addEventListener('click', e => {
+    if (e.target === $('modalEditProject')) $('modalEditProject').style.display = 'none';
   });
 
   // Wildcard modal bindings

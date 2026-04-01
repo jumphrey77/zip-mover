@@ -35,8 +35,13 @@ class ProjectManager {
       map.files = this._migrateMapKeys(map.files || {}, map.destinationRoot);
       this.maps[name] = map;
       this.projects[name] = {
-        name, projectDir,
+        name,
+        // displayName allows title-only rename without touching the folder
+        displayName:      map.displayName || name,
+        projectDir,
         destinationRoot:  map.destinationRoot,
+        // watchFolder: where incoming zips are dropped. Defaults to projectDir.
+        watchFolder:      map.watchFolder || projectDir,
         nextRunNumber:    map.nextRunNumber || 1,
         fileCount:        Object.keys(map.files).length,
         excludedFolders:  map.excludedFolders || [],
@@ -68,7 +73,6 @@ class ProjectManager {
     }
   }
 
-  // Migration: old filename-only keys → relative-path keys
   _migrateMapKeys(files, destinationRoot) {
     const migrated = {};
     for (const [key, tokenizedPath] of Object.entries(files)) {
@@ -114,7 +118,8 @@ class ProjectManager {
 
   async scanRootFolders(destinationRoot) {
     const results = [];
-    const entries = await fs.readdir(destinationRoot, { withFileTypes: true }).catch(e => { throw new Error(`Cannot read: ${e.message}`); });
+    const entries = await fs.readdir(destinationRoot, { withFileTypes: true })
+      .catch(e => { throw new Error(`Cannot read: ${e.message}`); });
     for (const entry of entries) {
       if (entry.isDirectory()) results.push(entry.name);
     }
@@ -147,14 +152,18 @@ class ProjectManager {
     const map = await this._buildMap(name, destinationRoot, excludedFolders);
     this.maps[name] = map;
     this.projects[name] = {
-      name, projectDir, destinationRoot,
-      nextRunNumber: 1,
-      fileCount: Object.keys(map.files).length,
+      name,
+      displayName:     name,
+      projectDir,
+      destinationRoot,
+      watchFolder:     projectDir,   // default: same as projectDir
+      nextRunNumber:   1,
+      fileCount:       Object.keys(map.files).length,
       excludedFolders: map.excludedFolders,
-      excludedFiles: [],
-      wildcards: [],
-      allowDropToUI: true,
-      lastRun: null
+      excludedFiles:   [],
+      wildcards:       [],
+      allowDropToUI:   true,
+      lastRun:         null
     };
     return this.projects[name];
   }
@@ -165,6 +174,31 @@ class ProjectManager {
     delete this.maps[name];
   }
 
+  // ── Title-only rename — no folder changes ─────────────────────────────────
+  async renameProject(name, newDisplayName) {
+    const project = this.projects[name];
+    const map     = this.maps[name];
+    if (!project || !map) throw new Error(`Project "${name}" not found`);
+
+    project.displayName = newDisplayName;
+    map.displayName     = newDisplayName;
+    await this.saveMap(name);
+  }
+
+  // ── Update watch folder ───────────────────────────────────────────────────
+  async updateWatchFolder(name, watchFolder) {
+    const project = this.projects[name];
+    const map     = this.maps[name];
+    if (!project || !map) throw new Error(`Project "${name}" not found`);
+
+    // Ensure the folder exists (it might be on a different drive)
+    await fs.ensureDir(watchFolder);
+
+    project.watchFolder = watchFolder;
+    map.watchFolder     = watchFolder;
+    await this.saveMap(name);
+  }
+
   async rebuildMap(name, newExcludedFolders) {
     const project = this.projects[name];
     if (!project) throw new Error(`Project "${name}" not found`);
@@ -173,7 +207,7 @@ class ProjectManager {
       : (this.maps[name] && this.maps[name].excludedFolders) || [];
     const map = await this._buildMap(name, project.destinationRoot, excluded);
     this.maps[name] = map;
-    this.projects[name].fileCount = Object.keys(map.files).length;
+    this.projects[name].fileCount       = Object.keys(map.files).length;
     this.projects[name].excludedFolders = map.excludedFolders;
     return map;
   }
@@ -197,25 +231,28 @@ class ProjectManager {
           if (isRoot && excludedSet.has(entry.name.toLowerCase())) continue;
           await scan(fullPath, false);
         } else if (entry.isFile()) {
-          const relKey = path.relative(destinationRoot, fullPath);
+          const relKey        = path.relative(destinationRoot, fullPath);
           const tokenizedPath = '{root}' + path.sep + relKey;
-          files[relKey] = tokenizedPath;
+          files[relKey]       = tokenizedPath;
         }
       }
     };
 
     await scan(destinationRoot, true);
 
+    const existing = this.maps[name] || {};
     const map = {
       destinationRoot,
+      displayName:   existing.displayName   || name,
+      watchFolder:   existing.watchFolder   || this._projectDir(name),
       excludedFolders,
-      excludedFiles:  (this.maps[name] && this.maps[name].excludedFiles)  || [],
-      wildcards:      (this.maps[name] && this.maps[name].wildcards)      || [],
-      allowDropToUI:  this.maps[name] ? (this.maps[name].allowDropToUI !== false) : true,
-      nextRunNumber:  (this.maps[name] && this.maps[name].nextRunNumber)  || 1,
-      builtAt:        new Date().toISOString(),
-      fileCount:      Object.keys(files).length,
-      collisions:     [],
+      excludedFiles: existing.excludedFiles || [],
+      wildcards:     existing.wildcards     || [],
+      allowDropToUI: existing.allowDropToUI !== undefined ? existing.allowDropToUI !== false : true,
+      nextRunNumber: existing.nextRunNumber || 1,
+      builtAt:       new Date().toISOString(),
+      fileCount:     Object.keys(files).length,
+      collisions:    [],
       files
     };
 
@@ -246,7 +283,7 @@ class ProjectManager {
       const zipDir = path.dirname(zipInternalPath).replace(/\//g, path.sep).toLowerCase();
       let best = null, bestScore = -1;
       for (const m of matches) {
-        const mapDir = path.dirname(m.relKey).toLowerCase();
+        const mapDir   = path.dirname(m.relKey).toLowerCase();
         const zipParts = zipDir.split(path.sep).filter(Boolean);
         const mapParts = mapDir.split(path.sep).filter(Boolean);
         let score = 0;
@@ -267,7 +304,7 @@ class ProjectManager {
     const map = this.maps[projectName];
     if (!map) throw new Error(`Project "${projectName}" not found`);
     map.files[relKey] = destination;
-    map.fileCount = Object.keys(map.files).length;
+    map.fileCount     = Object.keys(map.files).length;
     await fs.writeJson(this._mapPath(projectName), map, { spaces: 2 });
   }
 
@@ -275,12 +312,12 @@ class ProjectManager {
     const map = this.maps[projectName];
     if (!map) return;
     map.files[relKey] = tokenizedPath;
-    map.fileCount = Object.keys(map.files).length;
+    map.fileCount     = Object.keys(map.files).length;
     await this.saveMap(projectName);
   }
 
   async updateProjectSettings(name, settings) {
-    const map = this.maps[name];
+    const map     = this.maps[name];
     const project = this.projects[name];
     if (!map) throw new Error(`Project "${name}" not found`);
     const allowed = ['allowDropToUI', 'excludedFiles'];
@@ -308,7 +345,6 @@ class ProjectManager {
     return null;
   }
 
-  // ── MINOR FIX: use replaceAll() so multiple {root}/{filename} tokens work ──
   resolveWildcardDestination(projectName, wc, filename) {
     const map = this.maps[projectName];
     if (!map) return null;
@@ -352,25 +388,20 @@ class ProjectManager {
 
   // ── Run number ───────────────────────────────────────────────────────────
   incrementRunNumber(projectName) {
-    const map = this.maps[projectName];
+    const map     = this.maps[projectName];
     const project = this.projects[projectName];
-    const run = map.nextRunNumber || 1;
-    map.nextRunNumber = run + 1;
+    const run     = map.nextRunNumber || 1;
+    map.nextRunNumber     = run + 1;
     project.nextRunNumber = map.nextRunNumber;
     return run;
   }
 
   async resetRunNumber(projectName) {
-    const map = this.maps[projectName];
+    const map     = this.maps[projectName];
     const project = this.projects[projectName];
     if (!map) return;
     map.nextRunNumber = 1;
-    // ── BUG 6 SUPPORT: Also reset lastRun on the project object ──────────────
-    // This ensures sendStateUpdate() in main.js sees null lastRun immediately
-    if (project) {
-      project.nextRunNumber = 1;
-      project.lastRun = null;
-    }
+    if (project) { project.nextRunNumber = 1; project.lastRun = null; }
     await this.saveMap(projectName);
   }
 

@@ -24,7 +24,6 @@
 
       <nav id="projectList">
         <div class="project-list-label">PROJECTS</div>
-        <!-- Populated by JS -->
       </nav>
 
       <div class="sidebar-footer">
@@ -36,7 +35,6 @@
 
     <!-- Main content -->
     <main id="mainContent">
-      <!-- Views are swapped here by JS -->
       <!-- Setup screen (first launch) -->
       <div id="viewSetup" class="view">
         <div class="setup-screen">
@@ -175,7 +173,7 @@
     </div>
   </div>
 
-  <!-- Edit Exclusions Modal (Folders + Files combined) -->
+  <!-- Edit Exclusions Modal (Folders + Files combined) — kept for internal use -->
   <div id="modalExclusions" class="modal-overlay" style="display:none">
     <div class="modal" style="width:580px;max-width:calc(100vw - 40px)">
       <div class="modal-header">
@@ -183,8 +181,6 @@
         <button class="modal-close" id="btnExclusionsClose">✕</button>
       </div>
       <div class="modal-body">
-
-        <!-- Folders section -->
         <div class="excl-section-label">EXCLUDED FOLDERS</div>
         <div class="wizard-step2-hint" style="margin-bottom:8px">
           Unchecked folders are skipped during map scan. Changes trigger a rebuild.
@@ -197,21 +193,81 @@
           <span class="checklist-divider">·</span>
           <button class="btn-link" id="btnExclusionUncheckAll">Uncheck All</button>
         </div>
-
-        <!-- Files section -->
         <div class="excl-section-label" style="margin-top:16px">EXCLUDED FILES</div>
         <div class="wizard-step2-hint" style="margin-bottom:8px">
-          Files matching these names will be skipped during deployment and copied to the project's <code>Excluded\</code> folder instead. Comma-separated.
+          Files matching these names will be skipped during deployment. Comma-separated.
         </div>
         <input type="text" id="inputExcludedFiles"
           placeholder="e.g. .gitignore, .env, .DS_Store"
           style="width:100%;background:var(--bg-base);border:1px solid var(--border-bright);border-radius:var(--radius-sm);padding:8px 10px;font-family:var(--font-mono);font-size:12px;color:var(--text-primary);outline:none" />
         <div style="font-size:11px;color:var(--text-muted);margin-top:4px">These filenames are matched case-insensitively.</div>
-
       </div>
       <div class="modal-footer">
         <button class="btn-secondary" id="btnExclusionsCancel">Cancel</button>
         <button class="btn-primary" id="btnExclusionsSave">Save &amp; Rebuild Map</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit Project Modal (v5.18) -->
+  <div id="modalEditProject" class="modal-overlay" style="display:none">
+    <div class="modal" style="width:600px;max-width:calc(100vw - 40px)">
+      <div class="modal-header">
+        <h2>Edit Project</h2>
+        <button class="modal-close" id="btnEditProjectClose">✕</button>
+      </div>
+      <div class="modal-body">
+
+        <!-- Display Name -->
+        <div class="form-group">
+          <label for="inputEditDisplayName">Display Name</label>
+          <input type="text" id="inputEditDisplayName" placeholder="Project display name" autocomplete="off" />
+          <span class="form-hint">Title only — the project folder on disk is not renamed.</span>
+        </div>
+
+        <!-- Destination Root -->
+        <div class="form-group">
+          <label for="inputEditDestRoot">Destination Root Folder</label>
+          <div class="path-input-group">
+            <input type="text" id="inputEditDestRoot" placeholder="D:\Projects\MyApp" autocomplete="off" />
+            <button class="btn-browse" id="btnEditDestBrowse">Browse…</button>
+          </div>
+          <span class="form-hint">Root of your source code. Changing this triggers a full map rebuild.</span>
+        </div>
+
+        <!-- Watch Folder -->
+        <div class="form-group">
+          <label for="inputEditWatchFolder">Watch Folder <span style="color:var(--text-muted);font-weight:400">(where zips are dropped)</span></label>
+          <div class="path-input-group">
+            <input type="text" id="inputEditWatchFolder" placeholder="Default: project folder" autocomplete="off" />
+            <button class="btn-browse" id="btnEditWatchBrowse">Browse…</button>
+          </div>
+          <span class="form-hint">ZipMover watches this folder for incoming zip files. Useful when another tool can only write to your local user profile (e.g. <code style="color:var(--accent)">C:\Users\Jason\Downloads</code>). Leave as-is to use the default project folder.</span>
+        </div>
+
+        <!-- Excluded Folders -->
+        <div class="excl-section-label" style="margin-top:4px">EXCLUDED FOLDERS</div>
+        <div class="wizard-step2-hint" style="margin-bottom:8px">Unchecked folders are skipped during map scan.</div>
+        <div id="editFolderChecklistLoading" class="folder-checklist-loading">Loading folders…</div>
+        <div id="editFolderChecklist" class="folder-checklist" style="display:none"></div>
+        <div class="checklist-actions">
+          <button class="btn-link" id="btnEditCheckAll">Check All</button>
+          <span class="checklist-divider">·</span>
+          <button class="btn-link" id="btnEditUncheckAll">Uncheck All</button>
+        </div>
+
+        <!-- Excluded Files -->
+        <div class="excl-section-label" style="margin-top:16px">EXCLUDED FILES</div>
+        <div class="wizard-step2-hint" style="margin-bottom:8px">Files matching these names are skipped during deployment. Comma-separated.</div>
+        <input type="text" id="inputEditExcludedFiles"
+          placeholder="e.g. .gitignore, .env, .DS_Store"
+          style="width:100%;background:var(--bg-base);border:1px solid var(--border-bright);border-radius:var(--radius-sm);padding:8px 10px;font-family:var(--font-mono);font-size:12px;color:var(--text-primary);outline:none" />
+
+        <div id="editProjectError" class="form-error" style="display:none;margin-top:8px"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="btnEditProjectCancel">Cancel</button>
+        <button class="btn-primary"   id="btnEditProjectSave">Save Changes</button>
       </div>
     </div>
   </div>

@@ -6,11 +6,11 @@ const chokidar = require('chokidar');
 
 class WatcherManager {
   constructor(projectManager, zipProcessor, onEvent) {
-    this.projects = projectManager;
-    this.processor = zipProcessor;
-    this.onEvent = onEvent;
-    this.watchers = {};
-    this.status = {};
+    this.projects     = projectManager;
+    this.processor    = zipProcessor;
+    this.onEvent      = onEvent;
+    this.watchers     = {};
+    this.status       = {};
     this.debounceTimers = {};
   }
 
@@ -20,10 +20,13 @@ class WatcherManager {
     }
 
     const allProjects = this.projects.getAllProjects();
-    const project = allProjects.find(p => p.name === projectName);
+    const project     = allProjects.find(p => p.name === projectName);
     if (!project) return;
 
-    const watchPath = project.projectDir;
+    // ── Use watchFolder if set, otherwise fall back to projectDir ─────────────
+    // watchFolder allows zips to be dropped from a different location
+    // (e.g. C:\Users\Jason\Downloads) while backups/archives stay on D:\
+    const watchPath = project.watchFolder || project.projectDir;
 
     const watcher = chokidar.watch(watchPath, {
       ignored: [
@@ -32,16 +35,16 @@ class WatcherManager {
         /ZipArchive/,
         /NewFilesDetected/,
         /WorkingRun/,
-        /[/\\]config[/\\]/,        // config\ subfolder (project_map.json, run_log.json)
+        /[/\\]config[/\\]/,        // config\ subfolder
         /project_map\.json/,
         /run_log\.json/
       ],
-      persistent: true,
+      persistent:    true,
       ignoreInitial: true,
-      depth: 0,                    // Only watch root of project folder
+      depth:         0,            // Only watch root of watch folder
       awaitWriteFinish: {
         stabilityThreshold: 1500,
-        pollInterval: 200
+        pollInterval:       200
       }
     });
 
@@ -55,21 +58,21 @@ class WatcherManager {
       this.onEvent({
         type: 'watcher-error',
         projectName,
-        message: err.message,
+        message:   err.message,
         timestamp: new Date().toISOString()
       });
     });
 
     this.watchers[projectName] = watcher;
-    this.status[projectName] = {
-      active: true,
+    this.status[projectName]   = {
+      active:    true,
       watchPath,
       startedAt: new Date().toISOString(),
       lastEvent: null
     };
 
     this.onEvent({
-      type: 'watcher-started',
+      type:      'watcher-started',
       projectName,
       timestamp: new Date().toISOString()
     });
@@ -84,7 +87,7 @@ class WatcherManager {
       this.status[projectName].active = false;
     }
     this.onEvent({
-      type: 'watcher-stopped',
+      type:      'watcher-stopped',
       projectName,
       timestamp: new Date().toISOString()
     });
@@ -102,52 +105,48 @@ class WatcherManager {
 
   _handleZipDetected(projectName, zipPath) {
     const key = `${projectName}::${zipPath}`;
-    if (this.debounceTimers[key]) {
-      clearTimeout(this.debounceTimers[key]);
-    }
+    if (this.debounceTimers[key]) clearTimeout(this.debounceTimers[key]);
 
     this.debounceTimers[key] = setTimeout(async () => {
       delete this.debounceTimers[key];
 
       this.onEvent({
-        type: 'zip-detected',
+        type:      'zip-detected',
         projectName,
         zipPath,
-        zipName: path.basename(zipPath),
+        zipName:   path.basename(zipPath),
         timestamp: new Date().toISOString()
       });
 
       if (this.status[projectName]) {
         this.status[projectName].lastEvent = {
-          type: 'processing',
-          zipName: path.basename(zipPath),
+          type:      'processing',
+          zipName:   path.basename(zipPath),
           timestamp: new Date().toISOString()
         };
       }
 
       try {
+        // If zip came from an external watchFolder, processor will move it
+        // into projectDir working folder — original watch folder stays clean
         const result = await this.processor.processZip(projectName, zipPath);
 
         if (this.status[projectName]) {
           this.status[projectName].lastEvent = {
-            type: result.status,
-            zipName: result.zipName,
+            type:      result.status,
+            zipName:   result.zipName,
             runNumber: result.runNumber,
             timestamp: result.finishedAt
           };
         }
 
-        this.onEvent({
-          type: 'run-complete',
-          projectName,
-          result
-        });
+        this.onEvent({ type: 'run-complete', projectName, result });
 
       } catch (err) {
         this.onEvent({
-          type: 'run-failed',
+          type:      'run-failed',
           projectName,
-          error: err.message,
+          error:     err.message,
           timestamp: new Date().toISOString()
         });
       }

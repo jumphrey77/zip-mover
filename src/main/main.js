@@ -454,6 +454,58 @@ ipcMain.handle('process-zip', async (event, { projectName, zipPath }) => {
   } catch (err) { return { success: false, error: err.message }; }
 });
 
+
+ipcMain.handle('update-project', async (event, { name, updates }) => {
+  try {
+    const { displayName, watchFolder, destinationRoot, excludedFolders, excludedFiles } = updates;
+    let needsRebuild        = false;
+    let needsWatcherRestart = false;
+
+    if (displayName !== undefined) {
+      await projectManager.renameProject(name, displayName);
+    }
+
+    if (watchFolder !== undefined) {
+      await projectManager.updateWatchFolder(name, watchFolder);
+      needsWatcherRestart = true;
+    }
+
+    if (destinationRoot !== undefined) {
+      const project = projectManager.getAllProjects().find(p => p.name === name);
+      if (project && destinationRoot !== project.destinationRoot) {
+        project.destinationRoot = destinationRoot;
+        const map = projectManager.getProjectMap(name);
+        if (map) map.destinationRoot = destinationRoot;
+        needsRebuild = true;
+      }
+    }
+
+    if (excludedFiles !== undefined) {
+      await projectManager.updateProjectSettings(name, { excludedFiles });
+    }
+
+    if (needsRebuild || excludedFolders !== undefined) {
+      await projectManager.rebuildMap(name, excludedFolders);
+    }
+
+    if (needsWatcherRestart) {
+      watcherManager.stopWatcher(name);
+      watcherManager.startWatcher(name);
+    }
+
+    sendStateUpdate();
+    return { success: true };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+ipcMain.handle('browse-watch-folder', async () => {
+  const r = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'createDirectory'],
+    title: 'Choose Watch Folder (where zips will be dropped)'
+  });
+  return r.canceled ? { success: false } : { success: true, path: r.filePaths[0] };
+});
+
 // App lifecycle
 app.whenReady().then(createWindow);
 app.on('window-all-closed', () => {
