@@ -1,5 +1,6 @@
 {
   "name": "zipmover",
+  "author": "Jason Umphrey <jumphrey77@gmail.com>",
   "version": "1.0.0",
   "description": "Automated zip file deployment tool for development projects",
   "main": "src/main/main.js",
@@ -23,8 +24,14 @@
     "directories": {
       "output": "dist"
     },
-    "win": { "target": "nsis" },
-    "mac": { "target": "dmg" },
-    "linux": { "target": "AppImage" }
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
   }
 }

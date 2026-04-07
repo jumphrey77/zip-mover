@@ -1,4 +1,5 @@
 node_modules/
+dist/
 delete/
 manual-changes/
 needed-updates.txt
